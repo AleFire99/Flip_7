@@ -1,6 +1,7 @@
 # Flip 7 rules (Phase 1)
 
 Subset used by this codebase. Official action cards are omitted (see [DECISIONS.md](DECISIONS.md) ADR-001).
+Freeze, Flip Three, and Second Chance are now implemented as a Phase 2 plugin — see [RULES_PHASE2.md](RULES_PHASE2.md).
 
 ## Goal
 
