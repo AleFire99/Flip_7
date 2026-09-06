@@ -49,9 +49,10 @@ PLUS_BUCKETS: tuple[tuple[str, int, int], ...] = (
 #: 4 * 2 * 2 * 3 = 48 cells. One cell, ("<10%", True, *, *), is structurally
 #: unreachable: the minimum possible P(bust) at unique_count=6 is ~12.7% (the
 #: smallest 6 held values are 0-5, all singly-copied or barely-duplicated,
-#: but still nonzero) -- kept for grid uniformity, never populated by real
-#: samples, and safe on the "stay" fallback since `BasicStrategy.decide` will
-#: never actually look it up.
+#: but still nonzero) -- kept for grid uniformity. `_closest_fixed_k_numbers`
+#: samples the closest achievable state to it (the 6 least-duplicated
+#: values), whose true verdict is "hit" -- so this cell reads "hit" too, even
+#: though `BasicStrategy.decide` never actually looks it up in real play.
 ALL_CELLS: tuple[Cell, ...] = tuple(
     (pbust_bucket[0], near_flip7, has_x2, plus_bucket[0])
     for pbust_bucket, near_flip7, has_x2, plus_bucket in product(
@@ -90,6 +91,38 @@ def _bucket_bounds(label: str) -> tuple[int, int]:
             return low, high
     msg = f"unknown plus bucket: {label!r}"
     raise ValueError(msg)
+
+
+#: A cheap, human-at-the-table approximation of P(bust): the plain sum of
+#: this line's held number-card values (the same subtotal `score_line`
+#: already computes before x2/plus/the Flip 7 bonus). Maps unique cards
+#: held -> the sum at which the true lookahead_ev verdict flips from hit to
+#: stay (`None` means no in-range sum flips it -- always hit). Picked by an
+#: exhaustive sweep over every possible held-number identity at every
+#: unique_count (ADR-016): the best single threshold per count reproduces
+#: the true verdict on 97.8% of all 4096 states -- tighter than one flat
+#: threshold for every count, still just 5 numbers to memorize. Documentation
+#: only: `BasicStrategy.decide` uses exact P(bust) instead (see `Cell`).
+HELD_VALUE_SUM_STAY_THRESHOLDS: dict[int, int | None] = {
+    0: None,
+    1: None,
+    2: 23,
+    3: 24,
+    4: 25,
+    5: 27,
+    6: 36,
+}
+
+
+def tally_recommend(unique_count: int, held_value_sum: int) -> str:
+    """The cheap human tally's own recommendation (ADR-016), ignoring
+    x2/plus -- the exact chart shows those rarely move the verdict. Not
+    used by `BasicStrategy.decide`; for the printed cheat sheet only.
+    """
+    threshold = HELD_VALUE_SUM_STAY_THRESHOLDS.get(min(unique_count, 6))
+    if threshold is None:
+        return "hit"
+    return "stay" if held_value_sum >= threshold else "hit"
 
 
 def _sample_held_numbers(rng: Random, unique_count: int) -> list[int]:
@@ -198,30 +231,58 @@ def _sample_remaining_deck(
     return deck
 
 
+def _closest_fixed_k_numbers(low: float, high: float, k: int) -> list[int]:
+    """For a *fixed* held count `k` (the `near_flip7` case), P(bust) doesn't
+    grow incrementally -- it's fully determined by which `k` values are
+    held. If the target bucket `[low, high)` is unreachable at this exact
+    `k` in either direction (e.g. "<10%" at `k=6`, whose true minimum P(bust)
+    is ~12.7% -- even the 6 least-duplicated values can't get below that),
+    picks whichever extreme (least- or most-duplicated `k` values) lands
+    closest to the bucket, rather than an arbitrary one: if the bucket were
+    reachable, that's the state nearest to actually landing in it, and its
+    true hit/stay verdict is the most defensible stand-in.
+    """
+
+    def distance(numbers: list[int]) -> float:
+        remaining = full_counts()
+        for value in numbers:
+            remaining.numbers[value] -= 1
+        pb = p_bust(numbers, remaining)
+        if pb < low:
+            return low - pb
+        if pb >= high:
+            return pb - high
+        return 0.0
+
+    ranked = sorted(NUMBER_COUNTS, key=lambda v: NUMBER_COUNTS[v])
+    ascending = ranked[:k]
+    descending = ranked[::-1][:k]
+    return min((ascending, descending), key=distance)
+
+
 def _greedy_held_numbers_for_bucket(
     low: float, high: float, *, require_exact_k: int | None, k_cap: int
 ) -> list[int]:
-    """Deterministic fallback: greedily add the deck's most-duplicated
-    values (each addition raises P(bust) fastest, since candidates are
-    sorted by descending copy count). If `require_exact_k` is set (the
-    `near_flip7` case, which needs exactly that many held numbers), keeps
-    adding until reaching it regardless of bucket, since a shorter hand
-    would no longer be "one card from Flip 7"; otherwise stops as soon as
-    the bucket is entered or `k_cap` is reached. Guaranteed to terminate
-    since both bounds are finite.
+    """Deterministic fallback used when rejection sampling misses.
+
+    Not `near_flip7` (`require_exact_k` is `None`): greedily adds the deck's
+    most-duplicated values (each addition raises P(bust) fastest) until the
+    bucket is entered or `k_cap` is reached -- guaranteed to terminate since
+    `k_cap` is finite.
+
+    `near_flip7` (`require_exact_k` set): delegates to
+    `_closest_fixed_k_numbers`, since a fixed held count can't be grown
+    incrementally.
     """
+    if require_exact_k is not None:
+        return _closest_fixed_k_numbers(low, high, require_exact_k)
     candidates = sorted(NUMBER_COUNTS, key=lambda v: -NUMBER_COUNTS[v])
     numbers: list[int] = []
     remaining = full_counts()
-    target_k = require_exact_k if require_exact_k is not None else k_cap
     for value in candidates:
         numbers.append(value)
         remaining.numbers[value] -= 1
-        reached_target_k = len(numbers) == target_k
-        if require_exact_k is not None:
-            if reached_target_k:
-                break
-        elif low <= p_bust(numbers, remaining) < high or reached_target_k:
+        if low <= p_bust(numbers, remaining) < high or len(numbers) == k_cap:
             break
     return numbers
 

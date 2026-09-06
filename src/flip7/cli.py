@@ -11,6 +11,7 @@ from matplotlib.colors import ListedColormap
 
 from flip7.basic_strategy import (
     ALL_CELLS,
+    HELD_VALUE_SUM_STAY_THRESHOLDS,
     PBUST_BUCKETS,
     PLUS_BUCKETS,
     UNIQUE_COUNTS,
@@ -656,6 +657,52 @@ def _describe_hit_buckets(hit_buckets: set[str], bucket_order: list[str]) -> str
     )
 
 
+def _tally_pbust_translation(unique_count: int, threshold: int) -> str:
+    """The range of exact P(bust) among every real held-number combination
+    whose value-sum equals `threshold` at this `unique_count` -- shows how
+    the cheap tally threshold lines up with the exact chart's own P(bust)
+    buckets above.
+    """
+    values = []
+    for combo in combinations(range(13), unique_count):
+        if sum(combo) == threshold:
+            remaining = full_counts()
+            for value in combo:
+                remaining.numbers[value] -= 1
+            values.append(p_bust(list(combo), remaining))
+    low, high = min(values), max(values)
+    low_label, high_label = p_bust_bucket_label(low), p_bust_bucket_label(high)
+    bucket = low_label if low_label == high_label else f"{low_label}..{high_label}"
+    return f"{100.0 * low:.0f}-{100.0 * high:.0f}% ({bucket})"
+
+
+def _human_tally_cheat_sheet() -> list[str]:
+    lines = [
+        "Human-at-the-table cheat sheet (ADR-016): add up the values of the",
+        "number cards you're holding (the same subtotal you already track for",
+        "your score, before x2/plus). Stay once that total reaches:",
+        f"  {'unique cards held':<18} {'stay once sum reaches':>22} {'~P(bust) there':>18}",
+    ]
+    for unique_count in UNIQUE_COUNTS:
+        threshold = HELD_VALUE_SUM_STAY_THRESHOLDS.get(unique_count)
+        if threshold is None:
+            lines.append(f"  {unique_count:<18} {'(always hit)':>22} {'':>18}")
+            continue
+        translation = _tally_pbust_translation(unique_count, threshold)
+        lines.append(f"  {unique_count:<18} {threshold:>22} {translation:>18}")
+    lines.append(
+        "This tally alone reproduces the true hit/stay verdict on 97.8% of every"
+    )
+    lines.append(
+        "possible held-number identity (exhaustive check, see `flip7 pbust-bucket-check`)"
+    )
+    lines.append(
+        "-- close to, but not identical to, the shipped chart's own exact P(bust); it"
+    )
+    lines.append("ignores x2/plus, which the exact chart shows rarely move the verdict.")
+    return lines
+
+
 def _write_basic_strategy_summary(
     path: Path,
     table: BasicStrategyTable,
@@ -690,6 +737,8 @@ def _write_basic_strategy_summary(
     lines.append(
         "(7 unique cards is Flip 7 -- the round already ended, there is no hit/stay choice.)"
     )
+    lines.append("")
+    lines.extend(_human_tally_cheat_sheet())
     lines.append("")
     lines.append("Cost of using this chart instead of the full lookahead_ev solver:")
     lines.append(

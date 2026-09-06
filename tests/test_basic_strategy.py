@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from flip7.basic_strategy import (
     ALL_CELLS,
+    HELD_VALUE_SUM_STAY_THRESHOLDS,
     PBUST_BUCKETS,
     PLUS_BUCKETS,
     generate_basic_strategy_table,
     p_bust_bucket_label,
     plus_bucket_label,
+    tally_recommend,
 )
 from flip7.probability import DeckCounts, full_counts, lookahead_ev, p_bust
 from flip7.scoring import score_line
@@ -115,6 +117,31 @@ def test_recommend_uses_exact_p_bust_and_near_flip7() -> None:
     assert table.recommend([1], False, 100, remaining) == table.cells[
         ("<10%", False, False, "6+")
     ].recommendation
+
+
+def test_unreachable_near_flip7_low_pbust_cell_resolves_to_hit() -> None:
+    # ("<10%", True, *, *) is structurally unreachable (min P(bust) at
+    # unique_count=6 is ~12.7%), so the sampler always falls back to the
+    # closest achievable state -- the 6 least-duplicated values {0..5} --
+    # whose true verdict is "hit". It should read "hit", not an arbitrary
+    # extreme like the 6 most-duplicated values (whose true verdict would
+    # be "stay").
+    cell = ("<10%", True, False, "0")
+    table = generate_basic_strategy_table(seed=5, samples_per_cell=6, cells=[cell])
+    assert table.cells[cell].recommendation == "hit"
+
+
+def test_tally_recommend_matches_the_documented_thresholds() -> None:
+    assert tally_recommend(0, 0) == "hit"
+    assert tally_recommend(1, 12) == "hit"
+    assert tally_recommend(2, 22) == "hit"
+    assert tally_recommend(2, 23) == "stay"
+    assert tally_recommend(6, 35) == "hit"
+    assert tally_recommend(6, 36) == "stay"
+
+
+def test_held_value_sum_thresholds_cover_every_unique_count() -> None:
+    assert set(HELD_VALUE_SUM_STAY_THRESHOLDS) == set(range(7))
 
 
 def test_recommend_falls_back_to_stay_for_an_uncharted_cell() -> None:
