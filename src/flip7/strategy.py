@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from flip7.basic_strategy import Cell, plus_bucket_label
+from flip7.basic_strategy import Cell, p_bust_bucket_label, plus_bucket_label
 from flip7.cards import Card, CardKind
 from flip7.engine import Policy, TableView
 from flip7.probability import lookahead_ev, one_step_ev, p_bust
@@ -214,69 +214,83 @@ class RaceAwareEV:
         return max(others, key=lambda i: view.totals[i] + view.lines[i].current_score())
 
 
-#: The shipped basic-strategy chart (ADR-013): the literal output of
-#: `flip7.basic_strategy.generate_basic_strategy_table(seed=1,
-#: samples_per_cell=60).chart()`, baked in here so `BasicStrategy` is a cheap
-#: dict lookup rather than a fresh ~4-minute `lookahead_ev` distillation on
-#: every import/decision -- exactly like a printed Blackjack strategy card is
-#: computed once and then just read. It collapses to a simple rule: hit with
-#: 0-2 unique cards, stay with 3 or more, essentially regardless of modifiers.
-#: Regenerate with `flip7 basic-strategy --seed 1 --out reports` (see
+#: The shipped basic-strategy chart (ADR-013, re-keyed by ADR-016): the
+#: literal output of `flip7.basic_strategy.generate_basic_strategy_table(
+#: seed=1, samples_per_cell=60).chart()`, baked in here so `BasicStrategy` is
+#: a cheap dict lookup rather than a fresh multi-minute `lookahead_ev`
+#: distillation on every import/decision -- exactly like a printed Blackjack
+#: strategy card is computed once and then just read. Keyed on a coarse
+#: P(bust) bucket and whether the hand is one card from Flip 7, rather than
+#: raw card count (ADR-016) -- see docs/DECISIONS.md for why raw count alone
+#: hid a large, provable effect. Regenerate with
+#: `flip7 basic-strategy --seed 1 --out reports` (see
 #: reports/basic_strategy.txt for the plain-language version and the
 #: measured win-rate/EV gap versus `lookahead_ev`).
 BASIC_STRATEGY_CHART: dict[Cell, str] = {
-    (0, False, "0"): "hit",
-    (0, False, "1-5"): "hit",
-    (0, False, "6+"): "hit",
-    (0, True, "0"): "hit",
-    (0, True, "1-5"): "hit",
-    (0, True, "6+"): "hit",
-    (1, False, "0"): "hit",
-    (1, False, "1-5"): "hit",
-    (1, False, "6+"): "hit",
-    (1, True, "0"): "hit",
-    (1, True, "1-5"): "hit",
-    (1, True, "6+"): "hit",
-    (2, False, "0"): "hit",
-    (2, False, "1-5"): "hit",
-    (2, False, "6+"): "hit",
-    (2, True, "0"): "hit",
-    (2, True, "1-5"): "hit",
-    (2, True, "6+"): "hit",
-    (3, False, "0"): "stay",
-    (3, False, "1-5"): "stay",
-    (3, False, "6+"): "stay",
-    (3, True, "0"): "stay",
-    (3, True, "1-5"): "stay",
-    (3, True, "6+"): "stay",
-    (4, False, "0"): "stay",
-    (4, False, "1-5"): "stay",
-    (4, False, "6+"): "stay",
-    (4, True, "0"): "stay",
-    (4, True, "1-5"): "stay",
-    (4, True, "6+"): "stay",
-    (5, False, "0"): "stay",
-    (5, False, "1-5"): "stay",
-    (5, False, "6+"): "stay",
-    (5, True, "0"): "stay",
-    (5, True, "1-5"): "stay",
-    (5, True, "6+"): "stay",
-    (6, False, "0"): "stay",
-    (6, False, "1-5"): "stay",
-    (6, False, "6+"): "stay",
-    (6, True, "0"): "stay",
-    (6, True, "1-5"): "stay",
-    (6, True, "6+"): "stay",
+    ("<10%", False, False, "0"): "hit",
+    ("<10%", False, False, "1-5"): "hit",
+    ("<10%", False, False, "6+"): "hit",
+    ("<10%", False, True, "0"): "hit",
+    ("<10%", False, True, "1-5"): "hit",
+    ("<10%", False, True, "6+"): "hit",
+    ("<10%", True, False, "0"): "stay",
+    ("<10%", True, False, "1-5"): "stay",
+    ("<10%", True, False, "6+"): "stay",
+    ("<10%", True, True, "0"): "stay",
+    ("<10%", True, True, "1-5"): "stay",
+    ("<10%", True, True, "6+"): "stay",
+    ("10-27%", False, False, "0"): "hit",
+    ("10-27%", False, False, "1-5"): "hit",
+    ("10-27%", False, False, "6+"): "hit",
+    ("10-27%", False, True, "0"): "hit",
+    ("10-27%", False, True, "1-5"): "hit",
+    ("10-27%", False, True, "6+"): "hit",
+    ("10-27%", True, False, "0"): "hit",
+    ("10-27%", True, False, "1-5"): "hit",
+    ("10-27%", True, False, "6+"): "stay",
+    ("10-27%", True, True, "0"): "hit",
+    ("10-27%", True, True, "1-5"): "stay",
+    ("10-27%", True, True, "6+"): "stay",
+    ("27-40%", False, False, "0"): "stay",
+    ("27-40%", False, False, "1-5"): "stay",
+    ("27-40%", False, False, "6+"): "stay",
+    ("27-40%", False, True, "0"): "stay",
+    ("27-40%", False, True, "1-5"): "stay",
+    ("27-40%", False, True, "6+"): "stay",
+    ("27-40%", True, False, "0"): "hit",
+    ("27-40%", True, False, "1-5"): "stay",
+    ("27-40%", True, False, "6+"): "stay",
+    ("27-40%", True, True, "0"): "stay",
+    ("27-40%", True, True, "1-5"): "stay",
+    ("27-40%", True, True, "6+"): "stay",
+    ("40%+", False, False, "0"): "stay",
+    ("40%+", False, False, "1-5"): "stay",
+    ("40%+", False, False, "6+"): "stay",
+    ("40%+", False, True, "0"): "stay",
+    ("40%+", False, True, "1-5"): "stay",
+    ("40%+", False, True, "6+"): "stay",
+    ("40%+", True, False, "0"): "stay",
+    ("40%+", True, False, "1-5"): "stay",
+    ("40%+", True, False, "6+"): "stay",
+    ("40%+", True, True, "0"): "stay",
+    ("40%+", True, True, "1-5"): "stay",
+    ("40%+", True, True, "6+"): "stay",
 }
 
 
 class BasicStrategy:
     """Blackjack-style memorizable hit/stay chart distilled from `lookahead_ev`.
 
-    Looks up a fixed recommendation keyed by a small, human-memorizable cell
-    -- (unique number cards held, capped at 6; whether `x2` is held; a coarse
-    bucket of the current `+` total) -- instead of solving the live remaining
-    deck the way `LookaheadEV` does. The chart itself is generated by
+    Looks up a fixed recommendation keyed by a small cell -- a coarse P(bust)
+    bucket, whether the hand is one card from Flip 7, whether `x2` is held,
+    and a coarse bucket of the current `+` total (ADR-016) -- instead of
+    solving the live remaining deck the way `LookaheadEV` does. Unlike the
+    other axes, P(bust) is computed exactly from `view.remaining` here (this
+    policy already has perfect info per ADR-002, so there's no reason to
+    throw that away); a human at the table without exact deck knowledge can
+    use the cheap `sum(held card values)` approximation documented in
+    ADR-016 instead, which tracks the same bucket boundaries closely. The
+    chart itself is generated by
     `flip7.basic_strategy.generate_basic_strategy_table`, which averages
     `lookahead_ev`'s hit/stay verdict over a representative sample of
     plausible mid-game remaining decks per cell (ADR-013); this policy is
@@ -293,8 +307,13 @@ class BasicStrategy:
 
     def decide(self, view: TableView) -> str:
         line = view.lines[view.acting]
-        unique_count = min(line.unique_count, 6)
-        cell: Cell = (unique_count, line.has_x2, plus_bucket_label(line.plus))
+        pb = p_bust(line.numbers, view.remaining)
+        cell: Cell = (
+            p_bust_bucket_label(pb),
+            line.unique_count == 6,
+            line.has_x2,
+            plus_bucket_label(line.plus),
+        )
         return self._chart.get(cell, "stay")
 
 

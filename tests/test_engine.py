@@ -73,19 +73,26 @@ def test_target_constant() -> None:
     assert TARGET_SCORE == 200
 
 
-def test_basic_strategy_hits_below_three_cards_then_stays_in_a_real_round() -> None:
-    # The shipped chart (docs/DECISIONS.md ADR-013) hits with 0-2 unique
-    # cards and stays at 3+, regardless of modifiers -- drive a real round
-    # through the engine (mirroring the Scripted-policy pattern above) and
-    # check it actually plays that way, not just that .decide() says so in
-    # isolation.
+def test_basic_strategy_keeps_hitting_past_three_low_value_cards_then_stays_on_risk() -> None:
+    # The shipped chart (docs/DECISIONS.md ADR-016) keys on this line's exact
+    # P(bust), not raw card count -- drive a real round through the engine
+    # (mirroring the Scripted-policy pattern above) and check it actually
+    # plays that way: it keeps hitting through 5 unique low-duplication
+    # cards (P(bust)=0 the whole way, since none of 0-4 repeat in this
+    # deck), the exact case the old count-only chart's "stay at 3+" rule got
+    # wrong, then correctly stays once the only cards left are a genuine
+    # bust risk (a duplicate 9, P(bust)=1.0).
     deck = _pile(
-        number_card(5),  # initial deal: 1 unique card -> chart says hit
-        number_card(6),  # 1st hit: 2 unique cards -> chart still says hit
-        number_card(7),  # 2nd hit: 3 unique cards -> chart says stay next
-        number_card(8),  # would only be drawn if the policy kept hitting
+        number_card(0),
+        number_card(1),
+        number_card(2),
+        number_card(3),
+        number_card(4),
+        number_card(9),
+        number_card(9),
     )
     result = play_round([BasicStrategy()], random.Random(0), deck=deck)
-    assert result.lines[0].numbers == [5, 6, 7]
+    assert result.lines[0].numbers == [0, 1, 2, 3, 4, 9]
     assert result.lines[0].stayed
-    assert result.scores == [18]
+    assert not result.lines[0].busted
+    assert result.scores == [19]

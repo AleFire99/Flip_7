@@ -42,13 +42,17 @@ def test_process_trace_records_a_bust_by_unique_count_round_and_value() -> None:
     report = _empty_report()
     process_trace(report, trace)
 
-    # Both seats hold 1 unique number at decision time (seat 0 dealt a 3,
-    # seat 1 dealt a 5), so they land in the same cell: 1 hit (seat 0) out
-    # of 2 total decisions (seat 0 hits, seat 1 stays).
-    assert report.decisions[(1, False, "0")] == [1, 2]
+    # Both seats hold 1 unique number, but this 3-card deck's remaining pile
+    # (not the full 85-card deck) is all that's left to draw from, so their
+    # exact P(bust) differs sharply: seat 0 decides with only a duplicate 3
+    # left in the pile (P(bust)=1.0, "40%+"), seat 1 decides with an empty
+    # pile (P(bust)=0.0 by convention, "<10%").
+    assert report.decisions[("40%+", False, False, "0")] == [1, 1]  # seat 0's hit
+    assert report.decisions[("<10%", False, False, "0")] == [0, 1]  # seat 1's stay
     # Only seat 0's hit draws a card (a duplicate 3 -> bust); seat 1's stay
     # never enters the bust-rate breakdowns at all.
     assert report.bust_by_unique_count[1] == [1, 1]
+    assert report.bust_by_pbust_bucket["40%+"] == [1, 1]
     assert report.bust_by_round[1] == [1, 1]
     assert report.bust_by_value[3] == [1, 1]
 
@@ -66,7 +70,7 @@ def test_process_trace_records_stay_decisions_without_a_bust_entry() -> None:
     report = _empty_report()
     process_trace(report, trace)
 
-    assert report.decisions[(1, False, "0")] == [0, 2]  # 0 hits out of 2 decisions
+    assert report.decisions[("<10%", False, False, "0")] == [0, 2]  # 0 hits out of 2 decisions
     assert report.bust_by_unique_count == {}
     assert report.bust_by_round == {}
     assert report.bust_by_value == {}

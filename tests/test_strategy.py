@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from flip7.engine import TableView
-from flip7.probability import DeckCounts
+from flip7.probability import DeckCounts, full_counts
 from flip7.state import PlayerLine
 from flip7.strategy import (
     BASIC_STRATEGY_CHART,
@@ -59,25 +59,30 @@ def test_lookahead_ev_registered_in_named_policies() -> None:
 
 
 def test_basic_strategy_reads_the_chart_for_its_cell() -> None:
-    chart = {(2, False, "0"): "hit", (3, False, "0"): "stay"}
+    chart = {("<10%", False, False, "0"): "hit", ("40%+", False, False, "0"): "stay"}
     policy = BasicStrategy(chart)
-    remaining = DeckCounts(numbers={1: 5}, plus={}, x2=0)
+    remaining = DeckCounts(numbers={9: 5}, plus={}, x2=0)
 
-    hit_line = PlayerLine(numbers=[1, 2])
+    # Held value absent from the remaining deck: P(bust)=0.
+    hit_line = PlayerLine(numbers=[1])
     assert policy.decide(_view(hit_line, remaining)) == "hit"
 
-    stay_line = PlayerLine(numbers=[1, 2, 3])
+    # Held value is all that's left in the remaining deck: P(bust)=1.0.
+    stay_line = PlayerLine(numbers=[9])
     assert policy.decide(_view(stay_line, remaining)) == "stay"
 
 
-def test_basic_strategy_caps_unique_count_and_buckets_plus_total() -> None:
-    chart = {(6, True, "6+"): "hit"}
+def test_basic_strategy_classifies_plus_bucket_and_near_flip7_correctly() -> None:
+    chart = {("40%+", False, True, "6+"): "hit"}
     policy = BasicStrategy(chart)
-    remaining = DeckCounts(numbers={}, plus={}, x2=0)
+    remaining = DeckCounts(numbers={5: 5}, plus={}, x2=0)
     # 8 unique cards can't occur mid-decision (Flip 7 ends the round at 7),
-    # but decide() should clamp rather than KeyError; plus=100 should
-    # classify into the "6+" bucket, not fail to match.
-    line = PlayerLine(numbers=[0, 1, 2, 3, 4, 5, 6, 7], plus=100, has_x2=True)
+    # but decide() should never KeyError -- it falls back to "stay" via
+    # dict.get, same as any other uncharted cell. near_flip7 requires
+    # *exactly* 6 held numbers, so this (8) does not qualify; P(bust) is
+    # still exact (5/5 = 1.0, all that's left is the held value 5); plus=100
+    # classifies into the "6+" bucket.
+    line = PlayerLine(numbers=[0, 1, 2, 3, 5, 6, 7, 8], plus=100, has_x2=True)
     assert policy.decide(_view(line, remaining)) == "hit"
 
 
@@ -88,12 +93,36 @@ def test_basic_strategy_defaults_to_stay_for_an_uncharted_cell() -> None:
     assert policy.decide(_view(line, remaining)) == "stay"
 
 
-def test_basic_strategy_default_chart_hits_below_three_cards() -> None:
+def test_basic_strategy_default_chart_hits_with_an_empty_hand() -> None:
     policy = BasicStrategy()
     remaining = DeckCounts(numbers={1: 5}, plus={}, x2=0)
-    for count in (0, 1, 2):
-        line = PlayerLine(numbers=list(range(count)))
-        assert policy.decide(_view(line, remaining)) == "hit", count
+    line = PlayerLine(numbers=[])
+    assert policy.decide(_view(line, remaining)) == "hit"
+
+
+def test_basic_strategy_hits_a_low_value_hand_but_stays_on_a_high_value_hand() -> None:
+    # The exact blind spot ADR-013's addendum found and ADR-016 fixes: raw
+    # card count alone can't distinguish these two hands (6 held numbers vs.
+    # 4), but the shipped chart's P(bust) axis does -- {0..5} is one card
+    # from Flip 7 with low bust risk (P(bust)=12.7%, hit), {12,11,10,9} is
+    # only 4 cards but high bust risk (P(bust)=46.9%, stay). Both margins are
+    # comfortably clear of the true hit/stay boundary (~27%/~40%), unlike a
+    # 2-card high-value hand, which lands right at an exact EV tie.
+    policy = BasicStrategy()
+
+    low_numbers = [0, 1, 2, 3, 4, 5]
+    low_remaining = full_counts()
+    for value in low_numbers:
+        low_remaining.numbers[value] -= 1
+    low_line = PlayerLine(numbers=low_numbers)
+    assert policy.decide(_view(low_line, low_remaining)) == "hit"
+
+    high_numbers = [12, 11, 10, 9]
+    high_remaining = full_counts()
+    for value in high_numbers:
+        high_remaining.numbers[value] -= 1
+    high_line = PlayerLine(numbers=high_numbers)
+    assert policy.decide(_view(high_line, high_remaining)) == "stay"
 
 
 def test_basic_strategy_registered_in_named_policies() -> None:
