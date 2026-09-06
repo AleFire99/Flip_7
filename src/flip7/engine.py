@@ -82,15 +82,19 @@ class GameResult:
 
 @dataclass
 class TraceEvent:
-    """One human-readable step of a turn-by-turn game trace (issue #11).
+    """One step of a turn-by-turn game trace (issue #11), or one recorded
+    real hit/stay decision (issue #14).
 
     ``kind`` discriminates which fields are meaningful: ``"round_start"``
     (``round_no``, ``dealer``), ``"deal"``/``"hit"`` (``round_no``, ``seat``,
     ``card``, ``outcome``, and -- for Freeze/Flip Three -- ``target``/
-    ``target_via``), or ``"round_end"`` (``round_no``, ``scores``,
-    ``totals``, ``flip7_seat``). Left as one flat dataclass rather than a
-    union of per-kind classes since callers just want to append events to a
-    list and a formatter to read them back in order.
+    ``target_via``), ``"round_end"`` (``round_no``, ``scores``, ``totals``,
+    ``flip7_seat``), or ``"decide"`` (``round_no``, ``seat``, ``decision``,
+    ``state_unique_count``, ``state_has_x2``, ``state_plus`` -- the *real*
+    game state a `Policy.decide` call actually saw, one event per call,
+    issue #14's diagnostics build on this). Left as one flat dataclass
+    rather than a union of per-kind classes since callers just want to
+    append events to a list and read them back in order.
     """
 
     kind: str
@@ -104,6 +108,10 @@ class TraceEvent:
     scores: list[int] | None = None
     totals: list[int] | None = None
     flip7_seat: int | None = None
+    decision: str | None = None  # "hit" | "stay" (kind == "decide" only)
+    state_unique_count: int | None = None
+    state_has_x2: bool | None = None
+    state_plus: int | None = None
 
 
 @dataclass
@@ -321,8 +329,18 @@ def play_round(
                 continue
             acted = True
             view = _make_view(state, seat)
-            decision = policies[seat].decide(view)
-            if decision == "stay" or not state.pile:
+            raw_decision = policies[seat].decide(view)
+            actual_decision = "stay" if (raw_decision == "stay" or not state.pile) else "hit"
+            _log(
+                state,
+                kind="decide",
+                seat=seat,
+                decision=actual_decision,
+                state_unique_count=line.unique_count,
+                state_has_x2=line.has_x2,
+                state_plus=line.plus,
+            )
+            if actual_decision == "stay":
                 line.stayed = True
                 _log(state, kind="hit", seat=seat, outcome="stay")
                 continue

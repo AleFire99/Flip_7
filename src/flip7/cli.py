@@ -9,12 +9,14 @@ import numpy as np
 from matplotlib.colors import ListedColormap
 
 from flip7.basic_strategy import (
+    ALL_CELLS,
     PLUS_BUCKETS,
     UNIQUE_COUNTS,
     BasicStrategyTable,
     generate_basic_strategy_table,
 )
 from flip7.cards import full_deck
+from flip7.diagnostics import DiagnosticsReport, run_diagnostics
 from flip7.engine import Policy, TraceEvent, play_game, play_round
 from flip7.probability import (
     DeckCounts,
@@ -29,6 +31,7 @@ from flip7.probability import (
 from flip7.scoring import TARGET_SCORE, score_line
 from flip7.simulate import SimulationReport, compare_to_baseline, simulate_games
 from flip7.strategy import (
+    BASIC_STRATEGY_CHART,
     BasicStrategy,
     BustThreshold,
     ChaseFlip7,
@@ -375,6 +378,131 @@ def cmd_modifier_effect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _rate(bucket: list[int]) -> float | None:
+    busts, attempts = bucket
+    return busts / attempts if attempts else None
+
+
+def _format_diagnostics(report: DiagnosticsReport) -> str:
+    lines = [
+        f"Flip 7 per-strategy diagnostics: {report.policy_name} "
+        f"({report.n_games} games x {report.n_players} self-play seats, seed={report.seed})",
+        "",
+    ]
+
+    totals = sorted(report.totals)
+    n = len(totals)
+    lines.append(f"Score distribution ({n} final totals pooled across all seats/games):")
+    if n:
+        mean = sum(totals) / n
+        median = totals[n // 2] if n % 2 else (totals[n // 2 - 1] + totals[n // 2]) / 2
+        variance = sum((t - mean) ** 2 for t in totals) / n
+        lines.append(
+            f"  mean={mean:.1f} median={median:.1f} stdev={variance**0.5:.1f} "
+            f"min={totals[0]} max={totals[-1]}"
+        )
+    lines.append("")
+
+    lines.append(
+        "Empirical decision chart (observed hit-rate per cell vs. the shipped "
+        "basic_strategy chart, flip7.strategy.BASIC_STRATEGY_CHART):"
+    )
+    lines.append(
+        f"  {'unique':>6} {'x2':>5} {'plus':>5} {'n':>6} {'hit%':>7} {'chart says':>10}"
+    )
+    for cell in ALL_CELLS:
+        unique_count, has_x2, bucket_label = cell
+        hits, total = report.decisions.get(cell, [0, 0])
+        hit_pct = f"{100.0 * hits / total:6.1f}%" if total else "    n/a"
+        chart_rec = BASIC_STRATEGY_CHART.get(cell, "?")
+        lines.append(
+            f"  {unique_count:>6} {has_x2!s:>5} {bucket_label:>5} {total:>6} "
+            f"{hit_pct:>7} {chart_rec:>10}"
+        )
+    lines.append("")
+
+    lines.append("Bust rate by unique_count held at the moment of the hit decision:")
+    for unique_count in sorted(report.bust_by_unique_count):
+        busts, attempts = report.bust_by_unique_count[unique_count]
+        pct = f"{100.0 * busts / attempts:.1f}%" if attempts else "n/a"
+        lines.append(f"  unique_count={unique_count}: {busts}/{attempts} busts ({pct})")
+    lines.append("")
+
+    lines.append("Bust rate by round number within a game:")
+    for round_no in sorted(report.bust_by_round):
+        busts, attempts = report.bust_by_round[round_no]
+        pct = f"{100.0 * busts / attempts:.1f}%" if attempts else "n/a"
+        lines.append(f"  round {round_no}: {busts}/{attempts} busts ({pct})")
+    lines.append("")
+
+    lines.append("Bust rate by the actual number value drawn (higher values have more")
+    lines.append("copies in the deck -- flip7.cards.NUMBER_COUNTS -- so should bust more often):")
+    for value in sorted(report.bust_by_value):
+        busts, attempts = report.bust_by_value[value]
+        pct = f"{100.0 * busts / attempts:.1f}%" if attempts else "n/a"
+        lines.append(f"  value={value:>2}: {busts}/{attempts} busts ({pct})")
+
+    return "\n".join(lines) + "\n"
+
+
+def _plot_diagnostics_score_hist(path: Path, report: DiagnosticsReport) -> None:
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.hist(report.totals, bins=30)
+    ax.set_xlabel("Final game total")
+    ax.set_ylabel("Count (pooled across seats/games)")
+    ax.set_title(f"{report.policy_name}: score distribution ({report.n_games} games)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def _plot_diagnostics_bust_rates(path: Path, report: DiagnosticsReport) -> None:
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+
+    ucs = sorted(report.bust_by_unique_count)
+    axes[0].bar(ucs, [100.0 * (_rate(report.bust_by_unique_count[u]) or 0.0) for u in ucs])
+    axes[0].set_xlabel("unique_count at hit decision")
+    axes[0].set_ylabel("Bust rate (%)")
+
+    rounds = sorted(report.bust_by_round)
+    axes[1].bar(rounds, [100.0 * (_rate(report.bust_by_round[r]) or 0.0) for r in rounds])
+    axes[1].set_xlabel("round number")
+
+    values = sorted(report.bust_by_value)
+    axes[2].bar(values, [100.0 * (_rate(report.bust_by_value[v]) or 0.0) for v in values])
+    axes[2].set_xlabel("drawn number value")
+
+    fig.suptitle(f"{report.policy_name}: bust rate breakdowns")
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def cmd_diagnostics(args: argparse.Namespace) -> int:
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    registry = named_policies()
+    if args.policy not in registry:
+        msg = f"unknown policy name: {args.policy!r} (known: {sorted(registry)})"
+        raise SystemExit(msg)
+    policy = registry[args.policy]
+    report = run_diagnostics(
+        policy,
+        args.policy,
+        n_players=args.players,
+        n_games=args.games,
+        seed=args.seed,
+        target=args.target,
+        max_rounds=args.max_rounds,
+    )
+    text = _format_diagnostics(report)
+    (out / f"diagnostics_{args.policy}.txt").write_text(text, encoding="utf-8")
+    _plot_diagnostics_score_hist(out / f"diagnostics_{args.policy}_score_hist.png", report)
+    _plot_diagnostics_bust_rates(out / f"diagnostics_{args.policy}_bust_rate.png", report)
+    print(text)
+    return 0
+
+
 def _plot_basic_strategy(path: Path, table: BasicStrategyTable) -> None:
     bucket_labels = [label for label, _low, _high in PLUS_BUCKETS]
     cmap = ListedColormap(["#e15759", "#59a14f"])  # stay (red), hit (green)
@@ -671,6 +799,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     modifier_effect.add_argument("--out", type=str, default="reports")
     modifier_effect.set_defaults(func=cmd_modifier_effect)
+
+    diagnostics = sub.add_parser(
+        "diagnostics",
+        help=(
+            "Per-strategy empirical diagnostics: observed decision chart, bust-rate "
+            "breakdowns, and score distribution for one policy over many self-play games"
+        ),
+    )
+    diagnostics.add_argument("--policy", type=str, required=True)
+    diagnostics.add_argument("--players", type=int, default=3)
+    diagnostics.add_argument("--games", type=int, default=500)
+    diagnostics.add_argument("--seed", type=int, default=1)
+    diagnostics.add_argument("--out", type=str, default="reports")
+    diagnostics.add_argument("--target", type=int, default=TARGET_SCORE)
+    diagnostics.add_argument("--max-rounds", type=int, default=400, dest="max_rounds")
+    diagnostics.set_defaults(func=cmd_diagnostics)
 
     return parser
 
