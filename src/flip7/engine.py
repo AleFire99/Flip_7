@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from random import Random
 from typing import Protocol
 
-from flip7.cards import Card, full_deck
+from flip7.cards import Card, CardKind, full_deck
 from flip7.probability import DeckCounts, remaining_from_deck
 from flip7.scoring import TARGET_SCORE
 from flip7.state import PlayerLine
@@ -67,6 +67,84 @@ def _make_view(
     )
 
 
+def _choose_target(seat: int, lines: list[PlayerLine], n_players: int) -> int:
+    """Deterministic action-card target (ADR-010).
+
+    Freeze and Flip Three are aimed at the next still-**active** seat in
+    turn order after the drawing seat (dealer-order rotation), skipping
+    busted/stayed/flip7'd lines. If no other seat is active, the drawer
+    targets themself. This is a placeholder rule -- picking a target
+    strategically is issue #3's job; this only guarantees a target always
+    exists.
+    """
+    for offset in range(1, n_players):
+        candidate = (seat + offset) % n_players
+        if lines[candidate].active:
+            return candidate
+    return seat
+
+
+def _draw_and_resolve(
+    seat: int,
+    lines: list[PlayerLine],
+    pile: list[Card],
+    n_players: int,
+    dealt_box: list[int],
+) -> tuple[str, int | None]:
+    """Draw one card for ``seat`` and resolve its effect.
+
+    Returns ``(outcome, flip7_seat)``:
+
+    - ``outcome`` is ``seat``'s own draw result (``ok``/``bust``/``flip7``);
+      action cards that target someone else always report ``ok`` for the
+      drawer, since drawing them doesn't affect the drawer's own line.
+    - ``flip7_seat`` is set to whichever seat hit Flip 7 as a *direct or
+      cascading* result of this draw (a plain number card busting/completing
+      the drawer's own line, or a Flip Three forcing a target into Flip 7),
+      so ``play_round`` can end the round immediately either way.
+    """
+    if not pile:
+        return "ok", None
+    card = pile.pop()
+    dealt_box[0] += 1
+
+    if card.kind is CardKind.FREEZE:
+        lines[seat].cards.append(card)
+        target = _choose_target(seat, lines, n_players)
+        lines[target].stayed = True
+        return "ok", None
+
+    if card.kind is CardKind.FLIP_THREE:
+        lines[seat].cards.append(card)
+        target = _choose_target(seat, lines, n_players)
+        flip7_seat: int | None = None
+        for _ in range(3):
+            if not pile or not lines[target].active:
+                break
+            outcome, nested_flip7 = _draw_and_resolve(target, lines, pile, n_players, dealt_box)
+            if nested_flip7 is not None:
+                flip7_seat = nested_flip7
+            if outcome in ("bust", "flip7"):
+                break
+        return "ok", flip7_seat
+
+    if card.kind is CardKind.SECOND_CHANCE:
+        # Holding a second Second Chance has no extra effect, so a player who
+        # already holds one passes the new copy to another active player
+        # (ADR-010); otherwise they just hold onto it themselves.
+        if lines[seat].second_chances == 0:
+            target = seat
+        else:
+            target = _choose_target(seat, lines, n_players)
+        lines[target].apply(card)
+        return "ok", None
+
+    outcome = lines[seat].apply(card)
+    if outcome == "flip7":
+        return outcome, seat
+    return outcome, None
+
+
 def play_round(
     policies: list[Policy],
     rng: Random,
@@ -83,21 +161,23 @@ def play_round(
         pile = list(deck)
     lines = [PlayerLine() for _ in range(n_players)]
     scores_so_far = totals if totals is not None else [0] * n_players
-    dealt = 0
+    dealt_box = [0]
 
     for i in range(n_players):
         seat = (dealer + i) % n_players
         if not pile:
             break
-        card = pile.pop()
-        dealt += 1
-        outcome = lines[seat].apply(card)
-        if outcome == "flip7":
+        if not lines[seat].active:
+            # An earlier seat's opening Freeze/Flip Three already resolved
+            # against this seat before their own initial card was dealt.
+            continue
+        _outcome, flip7_seat_deal = _draw_and_resolve(seat, lines, pile, n_players, dealt_box)
+        if flip7_seat_deal is not None:
             return RoundResult(
                 scores=[p.current_score() for p in lines],
                 lines=lines,
-                flip7_seat=seat,
-                cards_dealt=dealt,
+                flip7_seat=flip7_seat_deal,
+                cards_dealt=dealt_box[0],
             )
 
     flip7_seat: int | None = None
@@ -114,19 +194,17 @@ def play_round(
             if decision == "stay" or not pile:
                 line.stayed = True
                 continue
-            card = pile.pop()
-            dealt += 1
-            outcome = line.apply(card)
-            if outcome == "bust":
-                continue
-            if outcome == "flip7":
-                flip7_seat = seat
+            outcome, flip7_seat_hit = _draw_and_resolve(seat, lines, pile, n_players, dealt_box)
+            if flip7_seat_hit is not None:
+                flip7_seat = flip7_seat_hit
                 return RoundResult(
                     scores=[p.current_score() for p in lines],
                     lines=lines,
                     flip7_seat=flip7_seat,
-                    cards_dealt=dealt,
+                    cards_dealt=dealt_box[0],
                 )
+            if outcome == "bust":
+                continue
         if not acted:
             break
 
@@ -134,7 +212,7 @@ def play_round(
         scores=[p.current_score() for p in lines],
         lines=lines,
         flip7_seat=flip7_seat,
-        cards_dealt=dealt,
+        cards_dealt=dealt_box[0],
     )
 
 

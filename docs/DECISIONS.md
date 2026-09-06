@@ -87,3 +87,19 @@ Architecture Decision Records for this analysis workspace. Status is `accepted` 
 **Option C:** Search or learned policies that freeze/endgame-race once action cards exist; until then, only implicit race via Flip 7 ending the round.
 
 **Action cards:** Add Freeze, Flip Three, and Second Chance as engine plugins on the 94-card deck without rewriting scoring.
+
+## ADR-010: Action-card engine plugin (Freeze, Flip Three, Second Chance) and targeting
+
+**Context:** ADR-009 deferred Freeze, Flip Three, and Second Chance to a later engine plugin on the 94-card deck. Issue #3 (opponent-aware policies) is not yet started, so no policy exists that can strategically choose *who* a Freeze or Flip Three should target, or who a redundant Second Chance should go to. The plugin still needs a concrete, deterministic answer today so the rest of the engine (and its tests) can be exact and reproducible.
+
+**Decision:**
+
+- `flip7.cards.full_deck(include_action_cards: bool = False)` keeps the default 85-card Phase 1 deck; `include_action_cards=True` (or the `full_deck_with_actions()` alias) builds the 94-card deck with 3 copies each of the new `CardKind.FREEZE`, `CardKind.FLIP_THREE`, and `CardKind.SECOND_CHANCE`.
+- Drawing an action card still counts as the drawer's one card for that hit (ADR-007); the effect resolves immediately as part of that draw, including when it is the initial face-up card or a card drawn mid-Flip-Three.
+- **Targeting rule:** target the next still-**active** seat after the drawing seat, in turn order (dealer-order rotation), skipping busted/stayed/Flip-7'd lines; if no other seat is active, target yourself. This same rule decides Freeze's and Flip Three's target, and where a *second* held Second Chance goes when the drawer already holds one (if nobody else is active, the drawer just keeps the extra copy, since holding more than one has no additional effect). This is a placeholder, not a strategy: full opponent-aware target selection is issue #3's job once such policies exist. The mechanism (an explicit target seat, computed once per action card) already exists so issue #3 can later replace `flip7.engine._choose_target` with a policy-driven choice without changing anything else.
+- **Freeze:** bank the target's line (`PlayerLine.stayed = True`) immediately, regardless of whose turn it is.
+- **Flip Three:** force the target to draw 3 cards back-to-back with no stay option; a mid-sequence bust or Flip 7 applies its consequence immediately and skips any remaining forced draws in that sequence.
+- **Second Chance:** held by whoever it resolves for (`PlayerLine.second_chances`, an int since a player can end up holding more than one via redistribution). A number-card bust is cancelled by consuming one held Second Chance instead (the duplicate card is discarded, no bust); this is a one-time use per copy held.
+- `flip7.scoring.score_line` is untouched: action cards never enter a line's numbers/plus/x2 and never count toward the Flip 7 unique-card check.
+
+**Consequences:** Freeze/Flip Three targeting is deterministic but not strategic (it never picks the "best" target for the drawer) until issue #3 lands. `flip7.probability`'s `DeckCounts`/EV math (issue #1's territory) still only tracks numbers/plus/x2, so it undercounts `remaining.total` whenever action cards remain in a 94-card pile; this only matters once code actually simulates on the 94-card deck; it is out of scope for this ADR.
