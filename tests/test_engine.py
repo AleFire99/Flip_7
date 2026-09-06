@@ -5,7 +5,7 @@ import random
 from flip7.cards import number_card
 from flip7.engine import play_game, play_round
 from flip7.scoring import FLIP7_BONUS, TARGET_SCORE
-from flip7.strategy import ChaseFlip7, StayAfterDeal
+from flip7.strategy import BasicStrategy, ChaseFlip7, StayAfterDeal
 
 
 class Scripted:
@@ -71,3 +71,21 @@ def test_game_unique_leader_over_target_wins() -> None:
 
 def test_target_constant() -> None:
     assert TARGET_SCORE == 200
+
+
+def test_basic_strategy_hits_below_three_cards_then_stays_in_a_real_round() -> None:
+    # The shipped chart (docs/DECISIONS.md ADR-013) hits with 0-2 unique
+    # cards and stays at 3+, regardless of modifiers -- drive a real round
+    # through the engine (mirroring the Scripted-policy pattern above) and
+    # check it actually plays that way, not just that .decide() says so in
+    # isolation.
+    deck = _pile(
+        number_card(5),  # initial deal: 1 unique card -> chart says hit
+        number_card(6),  # 1st hit: 2 unique cards -> chart still says hit
+        number_card(7),  # 2nd hit: 3 unique cards -> chart says stay next
+        number_card(8),  # would only be drawn if the policy kept hitting
+    )
+    result = play_round([BasicStrategy()], random.Random(0), deck=deck)
+    assert result.lines[0].numbers == [5, 6, 7]
+    assert result.lines[0].stayed
+    assert result.scores == [18]
