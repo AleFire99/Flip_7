@@ -81,6 +81,32 @@ class GameResult:
 
 
 @dataclass
+class TraceEvent:
+    """One human-readable step of a turn-by-turn game trace (issue #11).
+
+    ``kind`` discriminates which fields are meaningful: ``"round_start"``
+    (``round_no``, ``dealer``), ``"deal"``/``"hit"`` (``round_no``, ``seat``,
+    ``card``, ``outcome``, and -- for Freeze/Flip Three -- ``target``/
+    ``target_via``), or ``"round_end"`` (``round_no``, ``scores``,
+    ``totals``, ``flip7_seat``). Left as one flat dataclass rather than a
+    union of per-kind classes since callers just want to append events to a
+    list and a formatter to read them back in order.
+    """
+
+    kind: str
+    round_no: int
+    seat: int | None = None
+    card: str | None = None
+    outcome: str | None = None
+    target: int | None = None
+    target_via: str | None = None  # "policy" | "default"
+    dealer: int | None = None
+    scores: list[int] | None = None
+    totals: list[int] | None = None
+    flip7_seat: int | None = None
+
+
+@dataclass
 class _RoundState:
     """Mutable state threaded through one round's dealing and card resolution."""
 
@@ -90,6 +116,8 @@ class _RoundState:
     totals: list[int]
     dealer: int
     n_players: int
+    round_no: int = 1
+    trace: list[TraceEvent] | None = None
     dealt: int = 0
 
 
@@ -125,14 +153,16 @@ def _default_active_target(seat: int, lines: list[PlayerLine], n_players: int) -
     return seat
 
 
-def _choose_action_target(seat: int, state: _RoundState, card: Card) -> int:
+def _choose_action_target(seat: int, state: _RoundState, card: Card) -> tuple[int, str]:
     """Target for a Freeze or Flip Three (ADR-010).
 
     Any currently active seat is a legal target, including the drawer
     themself, per official rules. The acting policy picks via the optional
     `TargetingPolicy.choose_target` extension; if it doesn't implement that
     (true of all five built-in Phase 1 policies today), the engine falls
-    back to `_default_active_target`.
+    back to `_default_active_target`. Returns ``(target, via)`` where
+    ``via`` is ``"policy"`` or ``"default"``, so a trace can record which
+    mechanism picked the target (issue #11).
     """
     candidates = tuple(i for i in range(state.n_players) if state.lines[i].active)
     if not candidates:
@@ -142,11 +172,16 @@ def _choose_action_target(seat: int, state: _RoundState, card: Card) -> int:
         view = _make_view(state, seat)
         target = policy.choose_target(view, card, candidates)
         if target in candidates:
-            return target
-    return _default_active_target(seat, state.lines, state.n_players)
+            return target, "policy"
+    return _default_active_target(seat, state.lines, state.n_players), "default"
 
 
-def _draw_and_resolve(seat: int, state: _RoundState) -> tuple[str, int | None]:
+def _log(state: _RoundState, **kwargs: object) -> None:
+    if state.trace is not None:
+        state.trace.append(TraceEvent(round_no=state.round_no, **kwargs))  # type: ignore[arg-type]
+
+
+def _draw_and_resolve(seat: int, state: _RoundState, phase: str) -> tuple[str, int | None]:
     """Draw one card for ``seat`` and resolve its effect.
 
     Returns ``(outcome, flip7_seat)``:
@@ -168,18 +203,36 @@ def _draw_and_resolve(seat: int, state: _RoundState) -> tuple[str, int | None]:
 
     if card.kind is CardKind.FREEZE:
         lines[seat].cards.append(card)
-        target = _choose_action_target(seat, state, card)
+        target, via = _choose_action_target(seat, state, card)
         lines[target].stayed = True
+        _log(
+            state,
+            kind=phase,
+            seat=seat,
+            card=card.label(),
+            outcome="ok",
+            target=target,
+            target_via=via,
+        )
         return "ok", None
 
     if card.kind is CardKind.FLIP_THREE:
         lines[seat].cards.append(card)
-        target = _choose_action_target(seat, state, card)
+        target, via = _choose_action_target(seat, state, card)
+        _log(
+            state,
+            kind=phase,
+            seat=seat,
+            card=card.label(),
+            outcome="ok",
+            target=target,
+            target_via=via,
+        )
         flip7_seat: int | None = None
         for _ in range(3):
             if not pile or not lines[target].active:
                 break
-            outcome, nested_flip7 = _draw_and_resolve(target, state)
+            outcome, nested_flip7 = _draw_and_resolve(target, state, phase)
             if nested_flip7 is not None:
                 flip7_seat = nested_flip7
             if outcome in ("bust", "flip7"):
@@ -195,9 +248,18 @@ def _draw_and_resolve(seat: int, state: _RoundState) -> tuple[str, int | None]:
         else:
             target = _default_active_target(seat, lines, state.n_players)
         lines[target].apply(card)
+        _log(
+            state,
+            kind=phase,
+            seat=seat,
+            card=card.label(),
+            outcome="ok",
+            target=target if target != seat else None,
+        )
         return "ok", None
 
     outcome = lines[seat].apply(card)
+    _log(state, kind=phase, seat=seat, card=card.label(), outcome=outcome)
     if outcome == "flip7":
         return outcome, seat
     return outcome, None
@@ -210,10 +272,13 @@ def play_round(
     dealer: int = 0,
     deck: list[Card] | None = None,
     totals: list[int] | None = None,
+    use_action_cards: bool = False,
+    round_no: int = 1,
+    trace: list[TraceEvent] | None = None,
 ) -> RoundResult:
     n_players = len(policies)
     if deck is None:
-        pile = full_deck()
+        pile = full_deck(include_action_cards=use_action_cards)
         rng.shuffle(pile)
     else:
         pile = list(deck)
@@ -225,6 +290,8 @@ def play_round(
         totals=totals if totals is not None else [0] * n_players,
         dealer=dealer,
         n_players=n_players,
+        round_no=round_no,
+        trace=trace,
     )
 
     for i in range(n_players):
@@ -235,7 +302,7 @@ def play_round(
             # An earlier seat's opening Freeze/Flip Three already resolved
             # against this seat before their own initial card was dealt.
             continue
-        _outcome, flip7_seat_deal = _draw_and_resolve(seat, state)
+        _outcome, flip7_seat_deal = _draw_and_resolve(seat, state, "deal")
         if flip7_seat_deal is not None:
             return RoundResult(
                 scores=[p.current_score() for p in lines],
@@ -257,8 +324,9 @@ def play_round(
             decision = policies[seat].decide(view)
             if decision == "stay" or not state.pile:
                 line.stayed = True
+                _log(state, kind="hit", seat=seat, outcome="stay")
                 continue
-            outcome, flip7_seat_hit = _draw_and_resolve(seat, state)
+            outcome, flip7_seat_hit = _draw_and_resolve(seat, state, "hit")
             if flip7_seat_hit is not None:
                 flip7_seat = flip7_seat_hit
                 return RoundResult(
@@ -286,6 +354,8 @@ def play_game(
     *,
     target: int = TARGET_SCORE,
     max_rounds: int = 400,
+    use_action_cards: bool = False,
+    trace: list[TraceEvent] | None = None,
 ) -> GameResult:
     n_players = len(policies)
     totals = [0] * n_players
@@ -295,7 +365,18 @@ def play_game(
     dealer = 0
 
     for round_i in range(max_rounds):
-        result = play_round(policies, rng, dealer=dealer, totals=totals)
+        round_no = round_i + 1
+        if trace is not None:
+            trace.append(TraceEvent(kind="round_start", round_no=round_no, dealer=dealer))
+        result = play_round(
+            policies,
+            rng,
+            dealer=dealer,
+            totals=totals,
+            use_action_cards=use_action_cards,
+            round_no=round_no,
+            trace=trace,
+        )
         for i, score in enumerate(result.scores):
             totals[i] += score
             if result.lines[i].busted:
@@ -303,6 +384,16 @@ def play_game(
         if result.flip7_seat is not None:
             flip7s[result.flip7_seat] += 1
         round_scores.append(result.scores)
+        if trace is not None:
+            trace.append(
+                TraceEvent(
+                    kind="round_end",
+                    round_no=round_no,
+                    scores=result.scores,
+                    totals=list(totals),
+                    flip7_seat=result.flip7_seat,
+                )
+            )
 
         above = [i for i, t in enumerate(totals) if t >= target]
         if above:
