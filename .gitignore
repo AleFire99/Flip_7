@@ -9,11 +9,18 @@ wheels/
 # Virtual environments
 .venv
 
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
 # Analysis output
 reports/*
 !reports/.gitkeep
 
+# Claude Code local state (settings.json itself is shared/tracked)
 .claude/worktrees/
+.claude/settings.local.json
 
 # OS / editor
 .DS_Store
