@@ -7,6 +7,7 @@ from flip7.cli import (
     cmd_analyze,
     cmd_basic_strategy,
     cmd_compare,
+    cmd_diagnostics,
     cmd_ev_table,
     cmd_modifier_effect,
     cmd_replay,
@@ -261,3 +262,46 @@ def test_modifier_effect_is_deterministic(tmp_path: Path, capsys) -> None:
     cmd_modifier_effect(args)
     second = capsys.readouterr().out
     assert first == second
+
+
+def test_diagnostics_runs_and_writes_outputs(tmp_path: Path, capsys) -> None:
+    args = build_parser().parse_args(
+        [
+            "diagnostics",
+            "--policy",
+            "stay_after_deal",
+            "--players",
+            "3",
+            "--games",
+            "5",
+            "--seed",
+            "1",
+            "--out",
+            str(tmp_path),
+            "--target",
+            "30",
+            "--max-rounds",
+            "3",
+        ]
+    )
+    assert cmd_diagnostics(args) == 0
+    out = capsys.readouterr().out
+    assert "stay_after_deal" in out
+    assert "Score distribution" in out
+    assert "Empirical decision chart" in out
+    assert "Bust rate by unique_count" in out
+    assert (tmp_path / "diagnostics_stay_after_deal.txt").exists()
+    assert (tmp_path / "diagnostics_stay_after_deal_score_hist.png").exists()
+    assert (tmp_path / "diagnostics_stay_after_deal_bust_rate.png").exists()
+
+
+def test_diagnostics_rejects_unknown_policy(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        ["diagnostics", "--policy", "not_a_real_policy", "--out", str(tmp_path)]
+    )
+    try:
+        cmd_diagnostics(args)
+    except SystemExit as exc:
+        assert "unknown policy name" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit for an unknown policy name")
