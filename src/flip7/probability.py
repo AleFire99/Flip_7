@@ -117,5 +117,103 @@ def one_step_ev(
     return ev
 
 
+def lookahead_ev(
+    numbers: list[int],
+    plus: int,
+    has_x2: bool,
+    remaining: DeckCounts,
+    *,
+    busted: bool = False,
+) -> float:
+    """Optimal solo hit/stay EV via recursive DP over own line + remaining counts.
+
+    Unlike :func:`one_step_ev` (a single-card lookahead that always banks after
+    the next draw), this recurses: at every hypothetical future state it picks
+    ``max(stay_value, hit_value)`` again, so a "hit again if the next card was
+    safe" chain is valued correctly. This is analysis option B (ADR-003/ADR-009):
+    it assumes no other seat draws further cards from this point on -- it is the
+    optimal policy for *this* line against the remaining deck, not a model of
+    opponents.
+
+    The state space is kept tractable by tracking only the *delta* from the
+    starting line: which currently-unheld numbers get drawn, which of the (at
+    most 5) plus cards get drawn, and whether the (at most 1) x2 card gets
+    drawn. Because a repeat draw of an already-held number busts immediately
+    (a terminal, non-recursive branch), a surviving path never draws the same
+    number twice -- so this delta, plus the fixed starting ``remaining``,
+    determines the remaining counts at every node without copying dicts. The
+    delta is memoized as ``(new_numbers: frozenset[int], consumed_plus:
+    frozenset[int], consumed_x2: bool)``, bounded by at most ``13 choose <=6``
+    number subsets times ``32`` plus-card subsets times 2.
+    """
+    from flip7.scoring import score_line
+
+    if busted:
+        return 0.0
+    original_numbers = frozenset(numbers)
+    if len(original_numbers) >= 7:
+        # Already Flip 7 (round would already have ended); bank with the bonus.
+        return float(score_line(list(original_numbers), plus, has_x2, True))
+
+    memo: dict[tuple[frozenset[int], frozenset[int], bool], float] = {}
+
+    def solve(
+        new_numbers: frozenset[int],
+        consumed_plus: frozenset[int],
+        consumed_x2: bool,
+    ) -> float:
+        key = (new_numbers, consumed_plus, consumed_x2)
+        cached = memo.get(key)
+        if cached is not None:
+            return cached
+
+        current_numbers = original_numbers | new_numbers
+        current_plus = plus + sum(consumed_plus)
+        current_has_x2 = has_x2 or consumed_x2
+        stay_value = float(score_line(list(current_numbers), current_plus, current_has_x2, False))
+
+        n_total = 0
+        for k, base in remaining.numbers.items():
+            n_total += base - (1 if k in new_numbers else 0)
+        for v, base in remaining.plus.items():
+            n_total += base - (1 if v in consumed_plus else 0)
+        n_total += remaining.x2 - (1 if consumed_x2 else 0)
+
+        if n_total <= 0:
+            memo[key] = stay_value
+            return stay_value
+
+        hit_value = 0.0
+        for k, base in remaining.numbers.items():
+            count = base - (1 if k in new_numbers else 0)
+            if count <= 0:
+                continue
+            p = count / n_total
+            if k in current_numbers:
+                continue  # duplicate draw busts the line: contributes 0
+            grown = current_numbers | {k}
+            if len(grown) >= 7:
+                contrib = float(score_line(list(grown), current_plus, current_has_x2, True))
+            else:
+                contrib = solve(new_numbers | {k}, consumed_plus, consumed_x2)
+            hit_value += p * contrib
+        for v, base in remaining.plus.items():
+            count = base - (1 if v in consumed_plus else 0)
+            if count <= 0:
+                continue
+            p = count / n_total
+            hit_value += p * solve(new_numbers, consumed_plus | {v}, consumed_x2)
+        x2_count = remaining.x2 - (1 if consumed_x2 else 0)
+        if x2_count > 0:
+            p = x2_count / n_total
+            hit_value += p * solve(new_numbers, consumed_plus, True)
+
+        value = max(stay_value, hit_value)
+        memo[key] = value
+        return value
+
+    return solve(frozenset(), frozenset(), False)
+
+
 def remaining_from_deck(deck: list[Card]) -> DeckCounts:
     return counts_from_cards(deck)

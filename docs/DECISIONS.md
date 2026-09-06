@@ -87,3 +87,11 @@ Architecture Decision Records for this analysis workspace. Status is `accepted` 
 **Option C:** Search or learned policies that freeze/endgame-race once action cards exist; until then, only implicit race via Flip 7 ending the round.
 
 **Action cards:** Add Freeze, Flip Three, and Second Chance as engine plugins on the 94-card deck without rewriting scoring.
+
+## ADR-010: Option B implemented (`lookahead_ev`)
+
+**Context:** ADR-008 flagged `OneStepEV` as conservative; ADR-009 named the recursive extension "option B" and deferred it.
+
+**Decision:** `flip7.probability.lookahead_ev` computes the optimal solo hit/stay EV by recursing `max(stay, hit)` over own line + remaining counts (still assuming other seats draw no further cards -- full opponent modeling stays out of scope, tracked separately). `flip7.strategy.LookaheadEV` hits iff that EV beats the stay value, and is registered in `named_policies()`. `flip7.simulate.compare_to_baseline` and `flip7 compare` run every registered policy 1v1 against fixed baselines to compare it against the option A policies.
+
+**Consequences:** `lookahead_ev` is provably at least as good as `one_step_ev` (`lookahead_ev(...) >= one_step_ev(...)` always, since it is strictly more informed) but far more expensive per decision -- it re-solves an optimal policy from the remaining deck on every call, with no cross-decision caching. Simulations mixing it in should use smaller `--games` and/or a lowered `--target`/`--max-rounds`. Option C and full opponent modeling remain future work.

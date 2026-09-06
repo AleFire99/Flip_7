@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from flip7.engine import Policy, play_game
+from flip7.scoring import TARGET_SCORE
 
 
 @dataclass
@@ -26,6 +27,9 @@ def simulate_games(
     policies: list[Policy],
     n_games: int,
     seed: int,
+    *,
+    target: int = TARGET_SCORE,
+    max_rounds: int = 400,
 ) -> SimulationReport:
     rng = random.Random(seed)
     n = len(policies)
@@ -39,7 +43,7 @@ def simulate_games(
     round_score_n = np.zeros(n, dtype=np.float64)
 
     for g in range(n_games):
-        result = play_game(policies, rng)
+        result = play_game(policies, rng, target=target, max_rounds=max_rounds)
         if result.winner is None:
             unfinished += 1
         else:
@@ -69,3 +73,47 @@ def simulate_games(
         mean_flip7s=flip7s.mean(axis=0),
         mean_round_score=mean_round,
     )
+
+
+def compare_to_baseline(
+    baseline_name: str,
+    n_games: int,
+    seed: int,
+    policy_names: list[str] | None = None,
+    *,
+    target: int = TARGET_SCORE,
+    max_rounds: int = 400,
+) -> list[tuple[str, SimulationReport]]:
+    """Run every registered policy (or a chosen subset) 1v1 against one baseline.
+
+    Each matchup is an independent two-seat ``[challenger, baseline]`` game, so
+    win rates are directly comparable across challengers without needing an
+    exhaustive round robin across every pair of registered policies. Fresh
+    policy instances are built per matchup so no state leaks between seats.
+    """
+    from flip7.strategy import named_policies
+
+    registry = named_policies()
+    if baseline_name not in registry:
+        msg = f"unknown baseline policy: {baseline_name!r} (known: {sorted(registry)})"
+        raise ValueError(msg)
+    names = policy_names if policy_names is not None else list(registry)
+    unknown = [name for name in names if name not in registry]
+    if unknown:
+        msg = f"unknown policy names: {unknown} (known: {sorted(registry)})"
+        raise ValueError(msg)
+
+    results: list[tuple[str, SimulationReport]] = []
+    for name in names:
+        fresh = named_policies()
+        challenger = fresh[name]
+        baseline = fresh[baseline_name]
+        report = simulate_games(
+            [challenger, baseline],
+            n_games=n_games,
+            seed=seed,
+            target=target,
+            max_rounds=max_rounds,
+        )
+        results.append((name, report))
+    return results
