@@ -14,7 +14,8 @@ from flip7.cards import (
     plus_card,
     second_chance_card,
 )
-from flip7.engine import play_round
+from flip7.engine import TargetingPolicy, play_round
+from flip7.strategy import ChaseFlip7, StayAfterDeal
 
 
 class Scripted:
@@ -27,6 +28,20 @@ class Scripted:
         if not self._moves:
             return "stay"
         return self._moves.pop(0)
+
+
+class ScriptedTargeting(Scripted):
+    """A Scripted policy that also implements `TargetingPolicy`, always
+    picking a fixed, caller-chosen seat (used to prove arbitrary targeting,
+    not just "next in line", is possible).
+    """
+
+    def __init__(self, moves: list[str], target: int) -> None:
+        super().__init__(moves)
+        self.target = target
+
+    def choose_target(self, view: object, card: object, candidates: tuple[int, ...]) -> int:
+        return self.target
 
 
 def _pile(*cards: object) -> list:  # type: ignore[type-arg]
@@ -147,3 +162,60 @@ def test_second_chance_is_passed_on_when_already_held() -> None:
     )
     assert result.lines[0].second_chances == 1
     assert result.lines[1].second_chances == 1
+
+
+def test_freeze_can_target_any_active_seat_not_just_the_next_one() -> None:
+    # 4 players. The *default* targeting rule would pick seat 1 (next active
+    # seat after the drawer, seat 0). A policy implementing `choose_target`
+    # instead picks seat 3 -- a non-adjacent seat -- proving the mechanism
+    # supports arbitrary choice among all active players, not just the
+    # deterministic fallback's "next in line" rule.
+    deck = _pile(
+        number_card(1),
+        number_card(2),
+        number_card(3),
+        number_card(4),
+        freeze_card(),
+        plus_card(2),
+        plus_card(4),
+    )
+    seat1_policy = Scripted(["hit", "hit"])
+    seat3_policy = Scripted(["hit"])
+    result = play_round(
+        [
+            ScriptedTargeting(["hit"], target=3),
+            seat1_policy,
+            Scripted(["stay"]),
+            seat3_policy,
+        ],
+        random.Random(0),
+        deck=deck,
+    )
+    # Seat 3 (the chosen target) is frozen without ever being consulted.
+    assert result.lines[3].stayed is True
+    assert seat3_policy._moves == ["hit"]
+    # Seat 1 (the *default* rule's target) was never frozen: it got to act
+    # both of its scripted hits normally.
+    assert seat1_policy._moves == []
+    assert result.lines[1].stayed is True  # stayed on its own, after both hits
+    assert result.scores == [1, 2 + 2 + 4, 3, 4]
+
+
+def test_default_targeting_used_by_policies_without_choose_target() -> None:
+    # Phase 1 policies (ChaseFlip7, StayAfterDeal, ...) never implement
+    # choose_target. Confirm they still get a legal target via the engine's
+    # default fallback rule (next active seat in turn order, else self).
+    policy0 = ChaseFlip7()
+    assert not isinstance(policy0, TargetingPolicy)
+    deck = _pile(
+        number_card(1),
+        number_card(2),
+        number_card(3),
+        freeze_card(),
+    )
+    result = play_round(
+        [policy0, StayAfterDeal(), StayAfterDeal()],
+        random.Random(0),
+        deck=deck,
+    )
+    assert result.lines[1].stayed is True  # default: next active seat after seat 0

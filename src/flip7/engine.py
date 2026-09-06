@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from random import Random
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from flip7.cards import Card, CardKind, full_deck
 from flip7.probability import DeckCounts, remaining_from_deck
@@ -29,6 +29,39 @@ class Policy(Protocol):
         ...
 
 
+@runtime_checkable
+class TargetingPolicy(Protocol):
+    """Optional `Policy` extension (ADR-010): choose who a Freeze or Flip
+    Three targets, among all currently active seats.
+
+    This is a separate, ``runtime_checkable`` protocol rather than a
+    required member of `Policy` on purpose: a method declared on a
+    `Protocol` -- even with a concrete default body -- is only inherited by
+    classes that explicitly subclass that `Protocol`; it is *not* picked up
+    by classes that merely satisfy `Policy` structurally (confirmed against
+    mypy directly). None of the five Phase 1 policies (`StayAfterDeal`,
+    `ChaseFlip7`, `BustThreshold`, `OneStepEV`) subclass `Policy` -- they
+    just happen to match its shape -- so making `choose_target` a required
+    `Policy` member would force every one of them to grow a method they
+    don't need just to keep passing strict type-checking. Instead, the
+    engine detects support with ``isinstance(policy, TargetingPolicy)`` and
+    falls back to a fixed default (`_default_active_target`) for any policy
+    that doesn't implement it -- which today is all five built-in policies.
+    """
+
+    def choose_target(self, view: TableView, card: Card, candidates: tuple[int, ...]) -> int:
+        """Return a seat from ``candidates`` to target with ``card``.
+
+        ``candidates`` lists every currently **active** seat, including the
+        acting seat itself -- self-targeting is a legal choice for both
+        Freeze and Flip Three under official rules. Returning a seat
+        outside ``candidates`` is treated the same as not implementing this
+        method at all: the engine ignores it and falls back to
+        `_default_active_target`.
+        """
+        ...
+
+
 @dataclass
 class RoundResult:
     scores: list[int]
@@ -47,35 +80,43 @@ class GameResult:
     flip7s: list[int]
 
 
+@dataclass
+class _RoundState:
+    """Mutable state threaded through one round's dealing and card resolution."""
+
+    policies: list[Policy]
+    lines: list[PlayerLine]
+    pile: list[Card]
+    totals: list[int]
+    dealer: int
+    n_players: int
+    dealt: int = 0
+
+
 def _visible_and_remaining(lines: list[PlayerLine], deck: list[Card]) -> DeckCounts:
     return remaining_from_deck(deck)
 
 
-def _make_view(
-    lines: list[PlayerLine],
-    deck: list[Card],
-    totals: list[int],
-    dealer: int,
-    acting: int,
-) -> TableView:
+def _make_view(state: _RoundState, acting: int) -> TableView:
     return TableView(
-        lines=tuple(lines),
-        remaining=_visible_and_remaining(lines, deck),
-        totals=tuple(totals),
-        dealer=dealer,
+        lines=tuple(state.lines),
+        remaining=_visible_and_remaining(state.lines, state.pile),
+        totals=tuple(state.totals),
+        dealer=state.dealer,
         acting=acting,
     )
 
 
-def _choose_target(seat: int, lines: list[PlayerLine], n_players: int) -> int:
-    """Deterministic action-card target (ADR-010).
+def _default_active_target(seat: int, lines: list[PlayerLine], n_players: int) -> int:
+    """Fallback deterministic targeting rule (ADR-010).
 
-    Freeze and Flip Three are aimed at the next still-**active** seat in
-    turn order after the drawing seat (dealer-order rotation), skipping
-    busted/stayed/flip7'd lines. If no other seat is active, the drawer
-    targets themself. This is a placeholder rule -- picking a target
-    strategically is issue #3's job; this only guarantees a target always
-    exists.
+    Next still-**active** seat after the drawer in turn order (dealer-order
+    rotation), skipping busted/stayed/Flip-7'd lines; if no other seat is
+    active, the drawer targets themself. Used for Freeze/Flip Three whenever
+    the acting policy doesn't implement `TargetingPolicy`, and always for
+    where a *redundant* second Second Chance goes (a fixed, simple rule --
+    see ADR-010; that hand-off isn't routed through `TargetingPolicy` since
+    only Freeze/Flip Three targeting was asked to be policy-driven).
     """
     for offset in range(1, n_players):
         candidate = (seat + offset) % n_players
@@ -84,13 +125,28 @@ def _choose_target(seat: int, lines: list[PlayerLine], n_players: int) -> int:
     return seat
 
 
-def _draw_and_resolve(
-    seat: int,
-    lines: list[PlayerLine],
-    pile: list[Card],
-    n_players: int,
-    dealt_box: list[int],
-) -> tuple[str, int | None]:
+def _choose_action_target(seat: int, state: _RoundState, card: Card) -> int:
+    """Target for a Freeze or Flip Three (ADR-010).
+
+    Any currently active seat is a legal target, including the drawer
+    themself, per official rules. The acting policy picks via the optional
+    `TargetingPolicy.choose_target` extension; if it doesn't implement that
+    (true of all five built-in Phase 1 policies today), the engine falls
+    back to `_default_active_target`.
+    """
+    candidates = tuple(i for i in range(state.n_players) if state.lines[i].active)
+    if not candidates:
+        candidates = (seat,)
+    policy = state.policies[seat]
+    if isinstance(policy, TargetingPolicy):
+        view = _make_view(state, seat)
+        target = policy.choose_target(view, card, candidates)
+        if target in candidates:
+            return target
+    return _default_active_target(seat, state.lines, state.n_players)
+
+
+def _draw_and_resolve(seat: int, state: _RoundState) -> tuple[str, int | None]:
     """Draw one card for ``seat`` and resolve its effect.
 
     Returns ``(outcome, flip7_seat)``:
@@ -103,25 +159,27 @@ def _draw_and_resolve(
       the drawer's own line, or a Flip Three forcing a target into Flip 7),
       so ``play_round`` can end the round immediately either way.
     """
+    lines = state.lines
+    pile = state.pile
     if not pile:
         return "ok", None
     card = pile.pop()
-    dealt_box[0] += 1
+    state.dealt += 1
 
     if card.kind is CardKind.FREEZE:
         lines[seat].cards.append(card)
-        target = _choose_target(seat, lines, n_players)
+        target = _choose_action_target(seat, state, card)
         lines[target].stayed = True
         return "ok", None
 
     if card.kind is CardKind.FLIP_THREE:
         lines[seat].cards.append(card)
-        target = _choose_target(seat, lines, n_players)
+        target = _choose_action_target(seat, state, card)
         flip7_seat: int | None = None
         for _ in range(3):
             if not pile or not lines[target].active:
                 break
-            outcome, nested_flip7 = _draw_and_resolve(target, lines, pile, n_players, dealt_box)
+            outcome, nested_flip7 = _draw_and_resolve(target, state)
             if nested_flip7 is not None:
                 flip7_seat = nested_flip7
             if outcome in ("bust", "flip7"):
@@ -135,7 +193,7 @@ def _draw_and_resolve(
         if lines[seat].second_chances == 0:
             target = seat
         else:
-            target = _choose_target(seat, lines, n_players)
+            target = _default_active_target(seat, lines, state.n_players)
         lines[target].apply(card)
         return "ok", None
 
@@ -160,24 +218,30 @@ def play_round(
     else:
         pile = list(deck)
     lines = [PlayerLine() for _ in range(n_players)]
-    scores_so_far = totals if totals is not None else [0] * n_players
-    dealt_box = [0]
+    state = _RoundState(
+        policies=policies,
+        lines=lines,
+        pile=pile,
+        totals=totals if totals is not None else [0] * n_players,
+        dealer=dealer,
+        n_players=n_players,
+    )
 
     for i in range(n_players):
         seat = (dealer + i) % n_players
-        if not pile:
+        if not state.pile:
             break
         if not lines[seat].active:
             # An earlier seat's opening Freeze/Flip Three already resolved
             # against this seat before their own initial card was dealt.
             continue
-        _outcome, flip7_seat_deal = _draw_and_resolve(seat, lines, pile, n_players, dealt_box)
+        _outcome, flip7_seat_deal = _draw_and_resolve(seat, state)
         if flip7_seat_deal is not None:
             return RoundResult(
                 scores=[p.current_score() for p in lines],
                 lines=lines,
                 flip7_seat=flip7_seat_deal,
-                cards_dealt=dealt_box[0],
+                cards_dealt=state.dealt,
             )
 
     flip7_seat: int | None = None
@@ -189,19 +253,19 @@ def play_round(
             if not line.active:
                 continue
             acted = True
-            view = _make_view(lines, pile, scores_so_far, dealer, seat)
+            view = _make_view(state, seat)
             decision = policies[seat].decide(view)
-            if decision == "stay" or not pile:
+            if decision == "stay" or not state.pile:
                 line.stayed = True
                 continue
-            outcome, flip7_seat_hit = _draw_and_resolve(seat, lines, pile, n_players, dealt_box)
+            outcome, flip7_seat_hit = _draw_and_resolve(seat, state)
             if flip7_seat_hit is not None:
                 flip7_seat = flip7_seat_hit
                 return RoundResult(
                     scores=[p.current_score() for p in lines],
                     lines=lines,
                     flip7_seat=flip7_seat,
-                    cards_dealt=dealt_box[0],
+                    cards_dealt=state.dealt,
                 )
             if outcome == "bust":
                 continue
@@ -212,7 +276,7 @@ def play_round(
         scores=[p.current_score() for p in lines],
         lines=lines,
         flip7_seat=flip7_seat,
-        cards_dealt=dealt_box[0],
+        cards_dealt=state.dealt,
     )
 
 

@@ -52,23 +52,36 @@ against a second bust.
 If a player draws a *second* Second Chance while already holding one, see
 the targeting rule below for where the extra copy goes.
 
-## Targeting rule (ADR-010)
+## Targeting mechanism (ADR-010)
 
-Freeze, Flip Three, and a redundant second Second Chance all need *someone*
-to point at. Full strategic targeting (a player or policy choosing the best
-target) is out of scope here — that's issue #3's job, once opponent-aware
-policies exist. For now the engine uses one simple, deterministic rule so
-the mechanism exists and behavior is fully reproducible:
+Per official rules, whoever draws a Freeze or Flip Three may target **any**
+currently active player, including themselves — not just "the next
+player". Full strategic targeting (a policy that picks the *best* target)
+is still out of scope here — that's issue #3's job, once opponent-aware
+policies exist — but the mechanism to specify an arbitrary target already
+exists:
 
-> **Target the next still-active seat after the drawing seat, in turn
-> order (dealer-order rotation), skipping any player who has already
-> busted, stayed, or hit Flip 7. If no other seat is active, target
-> yourself.**
+- When a Freeze or Flip Three is drawn, the engine computes `candidates`:
+  every currently active seat, including the drawer.
+- If the acting player's policy implements the optional
+  `flip7.engine.TargetingPolicy` protocol (one method,
+  `choose_target(view, card, candidates) -> int`), the engine calls it and
+  uses whatever seat it returns (as long as that seat is in `candidates`).
+- Otherwise — true of all five built-in Phase 1 policies today, since none
+  of them implement `TargetingPolicy` — the engine falls back to a fixed
+  default:
 
-This applies identically to Freeze, Flip Three, and to where a drawn-again
-Second Chance goes when the drawer already holds one (if there's no other
-active player to hand it to, the drawer just keeps the extra copy — holding
-more than one has no additional effect beyond the first available use).
+  > **Target the next still-active seat after the drawing seat, in turn
+  > order (dealer-order rotation), skipping any player who has already
+  > busted, stayed, or hit Flip 7. If no other seat is active, target
+  > yourself.**
+
+A redundant second Second Chance (drawn while already holding one) always
+uses that same default rule directly, rather than going through
+`TargetingPolicy` — only Freeze/Flip Three targeting was made policy-driven.
+If there's no other active player to hand the extra copy to, the drawer
+just keeps it — holding more than one has no additional effect beyond the
+first available use.
 
 ## Everything else
 
