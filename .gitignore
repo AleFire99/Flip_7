@@ -13,6 +13,8 @@ wheels/
 reports/*
 !reports/.gitkeep
 
+.claude/worktrees/
+
 # OS / editor
 .DS_Store
 Thumbs.db
