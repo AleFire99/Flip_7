@@ -1,0 +1,42 @@
+[project]
+name = "flip7"
+version = "0.1.0"
+description = "Probability and simulation analysis of Flip 7 (numbers and modifiers)."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.9",
+    "numpy>=2.0",
+]
+
+[project.scripts]
+flip7 = "flip7.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["flip7"]
+strict = true
