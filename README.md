@@ -60,6 +60,18 @@ uv run flip7 --help
   are held, but roughly 1-2 seconds for a decision made with an empty hand
   against a near-full deck). Simulations that include it will run noticeably
   slower than pure option-A comparisons.
+- `race_aware_ev` -- **analysis option C** (ADR-012): the same recursive DP
+  hit value as `lookahead_ev`, adjusted using `TableView.lines`/`totals` --
+  it hits more aggressively when behind and an opponent is one card from
+  Flip 7 or already past 200, and stays more conservatively when leading
+  under the same threat, banking the win instead of chasing a marginal EV
+  edge. It is also the first built-in policy to implement
+  `TargetingPolicy.choose_target` (ADR-010): it freezes a Flip-7-threatening
+  opponent over the current leader, and either self-targets a Flip Three
+  (when its own line is worth hitting anyway) or hands it to the leader
+  (when it isn't) instead of the deterministic "next active seat" default.
+  See `tests/test_race_aware.py` for scripted scenarios proving both the
+  hit/stay and targeting divergence from `lookahead_ev`/the ADR-010 default.
 
 ## Compare
 
@@ -75,7 +87,8 @@ each of `stay_after_deal`, `chase_flip7`, and `one_step_ev` in turn, and writes
 - `--baselines stay_after_deal,one_step_ev` -- restrict which baselines to run.
 - `--policies lookahead_ev,one_step_ev` -- restrict which challengers to run.
 - `--target 1 --max-rounds 2` -- race to a trivial target instead of 200, for a
-  quick smoke run (handy since `lookahead_ev` matchups are the slow ones above).
+  quick smoke run (handy since `lookahead_ev` and `race_aware_ev` matchups are
+  the slow ones above -- `race_aware_ev` reuses the same DP).
 
 ## Git Flow
 
