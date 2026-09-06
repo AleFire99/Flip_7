@@ -6,7 +6,14 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import ListedColormap
 
+from flip7.basic_strategy import (
+    PLUS_BUCKETS,
+    UNIQUE_COUNTS,
+    BasicStrategyTable,
+    generate_basic_strategy_table,
+)
 from flip7.cards import full_deck
 from flip7.engine import Policy, play_round
 from flip7.probability import (
@@ -19,9 +26,22 @@ from flip7.probability import (
 )
 from flip7.scoring import TARGET_SCORE
 from flip7.simulate import SimulationReport, compare_to_baseline, simulate_games
-from flip7.strategy import BustThreshold, ChaseFlip7, OneStepEV, StayAfterDeal, named_policies
+from flip7.strategy import (
+    BasicStrategy,
+    BustThreshold,
+    ChaseFlip7,
+    OneStepEV,
+    StayAfterDeal,
+    named_policies,
+)
 
 DEFAULT_COMPARE_BASELINES = ("stay_after_deal", "chase_flip7", "one_step_ev")
+DEFAULT_BASIC_STRATEGY_BASELINES = (
+    "lookahead_ev",
+    "stay_after_deal",
+    "chase_flip7",
+    "one_step_ev",
+)
 
 
 def _write_summary(path: Path, report: SimulationReport) -> None:
@@ -199,6 +219,163 @@ def cmd_ev_table(args: argparse.Namespace) -> int:
     return 0
 
 
+def _plot_basic_strategy(path: Path, table: BasicStrategyTable) -> None:
+    bucket_labels = [label for label, _low, _high in PLUS_BUCKETS]
+    cmap = ListedColormap(["#e15759", "#59a14f"])  # stay (red), hit (green)
+    fig, axes = plt.subplots(1, 2, figsize=(7.5, 5.2), sharey=True)
+    for ax, has_x2 in zip(axes, (False, True), strict=True):
+        grid = np.zeros((len(UNIQUE_COUNTS), len(bucket_labels)))
+        for i, unique_count in enumerate(UNIQUE_COUNTS):
+            for j, bucket in enumerate(bucket_labels):
+                stats = table.cells[(unique_count, has_x2, bucket)]
+                grid[i, j] = 1.0 if stats.recommendation == "hit" else 0.0
+                ax.text(
+                    j,
+                    i,
+                    "HIT" if stats.recommendation == "hit" else "STAY",
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="white",
+                    fontweight="bold",
+                )
+        ax.imshow(grid, cmap=cmap, vmin=0, vmax=1, aspect="auto")
+        ax.set_xticks(range(len(bucket_labels)), bucket_labels)
+        ax.set_yticks(range(len(UNIQUE_COUNTS)), UNIQUE_COUNTS)
+        ax.set_xlabel("plus-modifier total")
+        ax.set_title(f"x2 {'held' if has_x2 else 'not held'}")
+    axes[0].set_ylabel("unique number cards held")
+    fig.suptitle(
+        f"Flip 7 basic strategy (seed={table.seed}, samples/cell={table.samples_per_cell})"
+    )
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def _describe_hit_buckets(hit_buckets: set[str], bucket_order: list[str]) -> str:
+    if not hit_buckets:
+        return "stay"
+    if hit_buckets == set(bucket_order):
+        return "hit regardless of plus modifiers"
+    if hit_buckets == {bucket_order[0]}:
+        return "hit only with no plus modifiers"
+    if hit_buckets == set(bucket_order[: len(hit_buckets)]) and bucket_order[
+        len(hit_buckets) - 1
+    ] != bucket_order[-1]:
+        return f"hit unless plus modifiers reach {bucket_order[len(hit_buckets)]}"
+    if hit_buckets == set(bucket_order[-len(hit_buckets) :]):
+        return f"hit only if plus modifiers reach {bucket_order[-len(hit_buckets)]}"
+    return "hit only with plus modifiers in " + ", ".join(
+        b for b in bucket_order if b in hit_buckets
+    )
+
+
+def _write_basic_strategy_summary(
+    path: Path,
+    table: BasicStrategyTable,
+    matchups: list[tuple[str, SimulationReport]],
+) -> None:
+    bucket_order = [label for label, _low, _high in PLUS_BUCKETS]
+    lines = [
+        f"Flip 7 basic strategy (seed={table.seed}, {table.samples_per_cell} sampled "
+        "remaining decks per cell, distilled from flip7.probability.lookahead_ev)",
+        "",
+        "Plain-language chart:",
+    ]
+    for has_x2 in (False, True):
+        lines.append(f"  x2 {'held' if has_x2 else 'not held'}:")
+        for unique_count in UNIQUE_COUNTS:
+            hit_buckets = {
+                bucket
+                for bucket in bucket_order
+                if table.cells[(unique_count, has_x2, bucket)].recommendation == "hit"
+            }
+            lines.append(
+                f"    {unique_count} unique card(s): "
+                f"{_describe_hit_buckets(hit_buckets, bucket_order)}."
+            )
+    lines.append("")
+    lines.append(
+        "(7+ unique cards is Flip 7 -- the round already ended, there is no hit/stay choice.)"
+    )
+    lines.append("")
+    lines.append("Cost of using this chart instead of the full lookahead_ev solver:")
+    lines.append(
+        f"{'vs baseline':<20} {'basic_strategy win%':>20} {'baseline win%':>16} "
+        f"{'mean tot gap':>13}"
+    )
+    for baseline_name, report in matchups:
+        n = max(report.n_games, 1)
+        chal_pct = 100.0 * report.wins[0] / n
+        base_pct = 100.0 * report.wins[1] / n
+        tot_gap = report.mean_totals[0] - report.mean_totals[1]
+        lines.append(
+            f"{baseline_name:<20} {chal_pct:>19.1f}% {base_pct:>15.1f}% {tot_gap:>13.1f}"
+        )
+    if matchups:
+        lookahead_row = next((r for name, r in matchups if name == "lookahead_ev"), None)
+        if lookahead_row is not None:
+            n = max(lookahead_row.n_games, 1)
+            gap = 100.0 * lookahead_row.wins[1] / n - 100.0 * lookahead_row.wins[0] / n
+            lines.append("")
+            lines.append(
+                f"Headline: against the full lookahead_ev solver 1v1, basic_strategy gives up "
+                f"about {gap:.1f} percentage points of win rate "
+                f"({100.0 * lookahead_row.wins[0] / n:.1f}% vs "
+                f"{100.0 * lookahead_row.wins[1] / n:.1f}%, {lookahead_row.n_games} games, "
+                f"seed={lookahead_row.seed})."
+            )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _basic_strategy_matchups(
+    policy: BasicStrategy,
+    baselines: list[str],
+    n_games: int,
+    seed: int,
+    target: int,
+    max_rounds: int,
+) -> list[tuple[str, SimulationReport]]:
+    registry = named_policies()
+    unknown = [name for name in baselines if name not in registry]
+    if unknown:
+        msg = f"unknown baseline policy names: {unknown} (known: {sorted(registry)})"
+        raise SystemExit(msg)
+    results: list[tuple[str, SimulationReport]] = []
+    for baseline_name in baselines:
+        baseline = named_policies()[baseline_name]
+        report = simulate_games(
+            [policy, baseline],
+            n_games=n_games,
+            seed=seed,
+            target=target,
+            max_rounds=max_rounds,
+        )
+        results.append((baseline_name, report))
+    return results
+
+
+def cmd_basic_strategy(args: argparse.Namespace) -> int:
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    table = generate_basic_strategy_table(args.seed, samples_per_cell=args.samples)
+    policy = BasicStrategy(table.chart())
+    baselines = [name.strip() for name in args.baselines.split(",") if name.strip()]
+    matchups = _basic_strategy_matchups(
+        policy,
+        baselines,
+        args.games,
+        args.seed,
+        args.target,
+        args.max_rounds,
+    )
+    _plot_basic_strategy(out / "basic_strategy.png", table)
+    _write_basic_strategy_summary(out / "basic_strategy.txt", table, matchups)
+    print((out / "basic_strategy.txt").read_text(encoding="utf-8"))
+    return 0
+
+
 def cmd_policies(_args: argparse.Namespace) -> int:
     print("\n".join(named_policies()))
     return 0
@@ -272,6 +449,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compare.add_argument("--max-rounds", type=int, default=400, dest="max_rounds")
     compare.set_defaults(func=cmd_compare)
+
+    basic = sub.add_parser(
+        "basic-strategy",
+        help="Generate the memorizable basic-strategy chart and measure its cost vs lookahead_ev",
+    )
+    basic.add_argument("--seed", type=int, default=1)
+    basic.add_argument("--out", type=str, default="reports")
+    basic.add_argument(
+        "--samples",
+        type=int,
+        default=60,
+        help="lookahead_ev samples averaged per chart cell (42 cells; higher is slower)",
+    )
+    basic.add_argument(
+        "--games",
+        type=int,
+        default=200,
+        help="Games per 1v1 matchup used to measure the win-rate/EV gap",
+    )
+    basic.add_argument(
+        "--baselines",
+        type=str,
+        default=",".join(DEFAULT_BASIC_STRATEGY_BASELINES),
+        help="Comma-separated baseline policy names to measure basic_strategy against",
+    )
+    basic.add_argument(
+        "--target",
+        type=int,
+        default=TARGET_SCORE,
+        help="Race-to score (lower it for a quick smoke run, e.g. --target 1 --max-rounds 2)",
+    )
+    basic.add_argument("--max-rounds", type=int, default=400, dest="max_rounds")
+    basic.set_defaults(func=cmd_basic_strategy)
 
     return parser
 

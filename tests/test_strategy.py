@@ -3,7 +3,13 @@ from __future__ import annotations
 from flip7.engine import TableView
 from flip7.probability import DeckCounts
 from flip7.state import PlayerLine
-from flip7.strategy import LookaheadEV, OneStepEV, named_policies
+from flip7.strategy import (
+    BASIC_STRATEGY_CHART,
+    BasicStrategy,
+    LookaheadEV,
+    OneStepEV,
+    named_policies,
+)
 
 
 def _view(line: PlayerLine, remaining: DeckCounts) -> TableView:
@@ -50,3 +56,54 @@ def test_lookahead_ev_registered_in_named_policies() -> None:
     policies = named_policies()
     assert "lookahead_ev" in policies
     assert isinstance(policies["lookahead_ev"], LookaheadEV)
+
+
+def test_basic_strategy_reads_the_chart_for_its_cell() -> None:
+    chart = {(2, False, "0"): "hit", (3, False, "0"): "stay"}
+    policy = BasicStrategy(chart)
+    remaining = DeckCounts(numbers={1: 5}, plus={}, x2=0)
+
+    hit_line = PlayerLine(numbers=[1, 2])
+    assert policy.decide(_view(hit_line, remaining)) == "hit"
+
+    stay_line = PlayerLine(numbers=[1, 2, 3])
+    assert policy.decide(_view(stay_line, remaining)) == "stay"
+
+
+def test_basic_strategy_caps_unique_count_and_buckets_plus_total() -> None:
+    chart = {(6, True, "6+"): "hit"}
+    policy = BasicStrategy(chart)
+    remaining = DeckCounts(numbers={}, plus={}, x2=0)
+    # 8 unique cards can't occur mid-decision (Flip 7 ends the round at 7),
+    # but decide() should clamp rather than KeyError; plus=100 should
+    # classify into the "6+" bucket, not fail to match.
+    line = PlayerLine(numbers=[0, 1, 2, 3, 4, 5, 6, 7], plus=100, has_x2=True)
+    assert policy.decide(_view(line, remaining)) == "hit"
+
+
+def test_basic_strategy_defaults_to_stay_for_an_uncharted_cell() -> None:
+    policy = BasicStrategy({})
+    remaining = DeckCounts(numbers={}, plus={}, x2=0)
+    line = PlayerLine(numbers=[1, 2])
+    assert policy.decide(_view(line, remaining)) == "stay"
+
+
+def test_basic_strategy_default_chart_hits_below_three_cards() -> None:
+    policy = BasicStrategy()
+    remaining = DeckCounts(numbers={1: 5}, plus={}, x2=0)
+    for count in (0, 1, 2):
+        line = PlayerLine(numbers=list(range(count)))
+        assert policy.decide(_view(line, remaining)) == "hit", count
+
+
+def test_basic_strategy_registered_in_named_policies() -> None:
+    policies = named_policies()
+    assert "basic_strategy" in policies
+    assert isinstance(policies["basic_strategy"], BasicStrategy)
+
+
+def test_basic_strategy_chart_constant_covers_the_full_grid() -> None:
+    from flip7.basic_strategy import ALL_CELLS
+
+    assert set(BASIC_STRATEGY_CHART) == set(ALL_CELLS)
+    assert set(BASIC_STRATEGY_CHART.values()) <= {"hit", "stay"}

@@ -72,6 +72,14 @@ uv run flip7 --help
   (when it isn't) instead of the deterministic "next active seat" default.
   See `tests/test_race_aware.py` for scripted scenarios proving both the
   hit/stay and targeting divergence from `lookahead_ev`/the ADR-010 default.
+- `basic_strategy` -- a small, human-memorizable hit/stay chart distilled
+  from `lookahead_ev` (ADR-013), analogous to a Blackjack basic-strategy
+  card. It looks up `(unique number cards held, capped at 6; whether `x2` is
+  held; a coarse bucket of the current `+` total)` in a fixed 42-cell table
+  instead of solving the live remaining deck, so a decision is a cheap dict
+  lookup, not a multi-second DP solve. See [Basic strategy](#basic-strategy)
+  below for the chart, how it's generated, and its measured cost relative to
+  `lookahead_ev`.
 
 ## Compare
 
@@ -89,6 +97,46 @@ each of `stay_after_deal`, `chase_flip7`, and `one_step_ev` in turn, and writes
 - `--target 1 --max-rounds 2` -- race to a trivial target instead of 200, for a
   quick smoke run (handy since `lookahead_ev` and `race_aware_ev` matchups are
   the slow ones above -- `race_aware_ev` reuses the same DP).
+
+## Basic strategy
+
+```bash
+uv run flip7 basic-strategy --seed 1 --out reports
+```
+
+Distills `lookahead_ev`'s full-information optimal play into a small,
+memorizable chart (ADR-013) -- the Flip 7 equivalent of a Blackjack
+basic-strategy card. For each of 42 cells (unique number cards held 0-6,
+whether `x2` is held, and a coarse `+`-total bucket -- `"0"`, `"1-5"`,
+`"6+"`), it averages `lookahead_ev`'s hit/stay verdict over a representative
+Monte Carlo sample of plausible mid-game remaining decks (see
+`flip7.basic_strategy` for exactly how those samples are drawn), rather than
+using the exact live remaining count -- a human can't track that at the
+table, and reproducing that simplification is the point.
+
+This writes `reports/basic_strategy.png` (a HIT/STAY grid, one panel per
+`x2` state) and `reports/basic_strategy.txt` (the plain-language version of
+the chart, plus the measured win-rate/EV cost of using it instead of
+`lookahead_ev` and the other baseline policies, via `simulate_games`). The
+chart it renders (default seed=1, 60 samples/cell) collapses to a strikingly
+simple rule: **hit with 0-2 unique cards, stay with 3 or more**, essentially
+regardless of modifiers -- see `reports/basic_strategy.txt` after running the
+command above for the exact win-rate gap this leaves against `lookahead_ev`.
+
+The chart itself is also registered as the `basic_strategy` policy (see
+above), baked from the same seed=1/60-samples run so importing it is instant
+rather than a multi-minute regeneration; `flip7 basic-strategy` always
+builds its own `BasicStrategy` from whatever it just (re)generated, so a
+custom `--seed`/`--samples` run's chart and win-rate numbers stay
+consistent with each other even if they differ from the shipped default.
+Useful flags:
+
+- `--samples 20` -- fewer `lookahead_ev` samples per cell (default 60, ~4
+  minutes to generate); lower for a faster, noisier chart.
+- `--games 50 --target 1 --max-rounds 2` -- a quick smoke run of the win-rate
+  measurement instead of the full race-to-200 comparison.
+- `--baselines lookahead_ev` -- restrict which baselines the cost is
+  measured against (default: `lookahead_ev,stay_after_deal,chase_flip7,one_step_ev`).
 
 ## Git Flow
 

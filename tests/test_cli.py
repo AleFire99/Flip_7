@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from flip7.cli import build_parser, cmd_analyze, cmd_compare, cmd_ev_table
+from flip7.cli import build_parser, cmd_analyze, cmd_basic_strategy, cmd_compare, cmd_ev_table
 
 
 def test_parser_analyze_defaults() -> None:
@@ -108,3 +108,86 @@ def test_compare_accepts_custom_baselines_and_policies(tmp_path: Path, capsys) -
     out = capsys.readouterr().out
     assert "vs one_step_ev" in out
     assert "chase_flip7" not in out
+
+
+def test_basic_strategy_runs_and_writes_outputs(tmp_path: Path, capsys) -> None:
+    args = build_parser().parse_args(
+        [
+            "basic-strategy",
+            "--seed",
+            "0",
+            "--out",
+            str(tmp_path),
+            "--samples",
+            "1",
+            "--games",
+            "2",
+            "--baselines",
+            "stay_after_deal,one_step_ev",
+            "--target",
+            "1",
+            "--max-rounds",
+            "2",
+        ]
+    )
+    assert cmd_basic_strategy(args) == 0
+    out = capsys.readouterr().out
+    assert "basic strategy" in out.lower()
+    assert "stay_after_deal" in out
+    assert "one_step_ev" in out
+    assert (tmp_path / "basic_strategy.txt").exists()
+    assert (tmp_path / "basic_strategy.png").exists()
+
+
+def test_basic_strategy_headline_names_lookahead_ev_when_included(
+    tmp_path: Path, capsys
+) -> None:
+    args = build_parser().parse_args(
+        [
+            "basic-strategy",
+            "--seed",
+            "0",
+            "--out",
+            str(tmp_path),
+            "--samples",
+            "1",
+            "--games",
+            "2",
+            "--baselines",
+            "lookahead_ev",
+            "--target",
+            "1",
+            "--max-rounds",
+            "2",
+        ]
+    )
+    assert cmd_basic_strategy(args) == 0
+    out = capsys.readouterr().out
+    assert "Headline" in out
+    assert "lookahead_ev" in out
+
+
+def test_basic_strategy_rejects_unknown_baseline(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "basic-strategy",
+            "--out",
+            str(tmp_path),
+            "--samples",
+            "1",
+            "--games",
+            "1",
+            "--baselines",
+            "not_a_real_policy",
+            "--target",
+            "1",
+            "--max-rounds",
+            "1",
+        ]
+    )
+    try:
+        cmd_basic_strategy(args)
+    except SystemExit as exc:
+        assert "unknown baseline policy" in str(exc)
+    else:
+        raise AssertionError("expected SystemExit for an unknown baseline policy name")
