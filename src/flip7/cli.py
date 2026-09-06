@@ -17,6 +17,8 @@ from flip7.basic_strategy import (
 from flip7.cards import full_deck
 from flip7.engine import Policy, TraceEvent, play_game, play_round
 from flip7.probability import (
+    DeckCounts,
+    full_counts,
     lookahead_ev,
     one_step_ev,
     p_bust,
@@ -24,7 +26,7 @@ from flip7.probability import (
     p_modifier,
     subtract_visible,
 )
-from flip7.scoring import TARGET_SCORE
+from flip7.scoring import TARGET_SCORE, score_line
 from flip7.simulate import SimulationReport, compare_to_baseline, simulate_games
 from flip7.strategy import (
     BasicStrategy,
@@ -271,6 +273,104 @@ def cmd_replay(args: argparse.Namespace) -> int:
     )
     text = _format_trace(trace)
     (out / "replay.txt").write_text(text, encoding="utf-8")
+    print(text)
+    return 0
+
+
+#: One representative plus-total per `flip7.basic_strategy.PLUS_BUCKETS` bucket
+#: ("0", "1-5", "6+"): 0, 5, 10.
+_PLUS_REPRESENTATIVES: tuple[tuple[str, int], ...] = (("0", 0), ("1-5", 5), ("6+", 10))
+
+
+#: Two fixed representative held-number sets per `unique_count`, deliberately
+#: not sampled (identity-vs-count is concern 1, out of scope for this
+#: concern-2-only investigation -- see ADR-013's addendum). "low" turned out
+#: to be degenerate on its own: {0, 1, 2, ...} has almost no duplication risk
+#: (values 0/1 have only 1 copy each in the deck), so every cell recommends
+#: "hit" regardless of modifiers -- nowhere near the actual hit/stay
+#: boundary, so it cannot show whether a modifier ever flips a verdict.
+#: "high" ({12, 11, 10, ...}, the deck's most-duplicated values) sits much
+#: closer to that boundary, so both are reported side by side.
+_HELD_REPRESENTATIVES: tuple[tuple[str, object], ...] = (
+    ("low", lambda k: list(range(k))),
+    ("high", lambda k: list(range(12, 12 - k, -1))),
+)
+
+
+def _remaining_after(numbers: list[int]) -> DeckCounts:
+    remaining = full_counts()
+    for value in numbers:
+        remaining.numbers[value] -= 1
+    return remaining
+
+
+def cmd_modifier_effect(args: argparse.Namespace) -> int:
+    """Issue #13 concern 2: does a held x2/plus modifier ever change the
+    hit/stay verdict, via an exact, deterministic paired delta against
+    `lookahead_ev` (no Monte Carlo sampling, unlike `flip7.basic_strategy`'s
+    chart) -- see ADR-013's addendum in docs/DECISIONS.md.
+    """
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "Flip 7 modifier-effect investigation (issue #13, concern 2)",
+        "",
+        "Deterministic paired delta against exact lookahead_ev: for each unique_count,",
+        "held numbers are fixed (see representatives below) and the remaining deck is",
+        "the full deck minus those held numbers -- no Monte Carlo sampling, no",
+        "depletion noise, unlike flip7.basic_strategy's chart. has_x2 and plus_total",
+        "(one representative value per PLUS_BUCKETS bucket) are toggled to see",
+        "whether the hit/stay verdict ever flips.",
+        "",
+        "Note: lookahead_ev(numbers, plus, has_x2, remaining) returns",
+        "max(stay_value, hit_value) at the root state, not hit_value alone -- so",
+        "'hit_ev' below equals 'stay' exactly whenever hitting is no better than",
+        "staying (an exact DP tie), not just when it is worse. -> in this report",
+        "always resolves an exact tie as 'stay' (strict >), matching",
+        "flip7.basic_strategy.evaluate_cell's own convention.",
+        "",
+    ]
+    any_flip = False
+    for rep_name, held_fn in _HELD_REPRESENTATIVES:
+        lines.append(f"=== held representative: {rep_name} ===")
+        for unique_count in range(7):
+            numbers = held_fn(unique_count)  # type: ignore[operator]
+            remaining = _remaining_after(numbers)
+            cells: dict[tuple[bool, int], tuple[float, float, str]] = {}
+            lines.append(f"unique_count={unique_count} (held={numbers}):")
+            for has_x2 in (False, True):
+                for label, plus_total in _PLUS_REPRESENTATIVES:
+                    hit_ev = lookahead_ev(numbers, plus_total, has_x2, remaining)
+                    stay_value = float(score_line(numbers, plus_total, has_x2, False))
+                    decision = "hit" if hit_ev > stay_value else "stay"
+                    cells[(has_x2, plus_total)] = (hit_ev, stay_value, decision)
+                    lines.append(
+                        f"  x2={has_x2!s:<5} plus={label:<4} hit_ev={hit_ev:8.2f} "
+                        f"stay={stay_value:8.2f} -> {decision}"
+                    )
+            x2_flip_at = [
+                label
+                for label, plus_total in _PLUS_REPRESENTATIVES
+                if cells[(False, plus_total)][2] != cells[(True, plus_total)][2]
+            ]
+            plus_flips_for = {
+                has_x2: len({cells[(has_x2, p)][2] for _, p in _PLUS_REPRESENTATIVES}) > 1
+                for has_x2 in (False, True)
+            }
+            if x2_flip_at or any(plus_flips_for.values()):
+                any_flip = True
+            lines.append(
+                "  x2 ever flips the verdict (plus fixed): "
+                + (f"YES, at plus={x2_flip_at}" if x2_flip_at else "no")
+            )
+            lines.append(f"  plus ever flips the verdict (x2 fixed): {plus_flips_for}")
+            lines.append("")
+    lines.append(
+        "Any flip found across this whole grid (both representatives): "
+        + ("YES" if any_flip else "no")
+    )
+    text = "\n".join(lines) + "\n"
+    (out / "modifier_effect.txt").write_text(text, encoding="utf-8")
     print(text)
     return 0
 
@@ -561,6 +661,16 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--target", type=int, default=TARGET_SCORE)
     replay.add_argument("--max-rounds", type=int, default=400, dest="max_rounds")
     replay.set_defaults(func=cmd_replay)
+
+    modifier_effect = sub.add_parser(
+        "modifier-effect",
+        help=(
+            "Issue #13 concern 2: exact, deterministic check of whether x2/plus "
+            "modifiers ever flip the basic-strategy hit/stay verdict"
+        ),
+    )
+    modifier_effect.add_argument("--out", type=str, default="reports")
+    modifier_effect.set_defaults(func=cmd_modifier_effect)
 
     return parser
 

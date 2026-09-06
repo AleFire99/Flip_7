@@ -8,6 +8,7 @@ from flip7.cli import (
     cmd_basic_strategy,
     cmd_compare,
     cmd_ev_table,
+    cmd_modifier_effect,
     cmd_replay,
 )
 
@@ -239,3 +240,24 @@ def test_replay_supports_the_94_card_action_card_deck(tmp_path: Path) -> None:
     )
     assert cmd_replay(args) == 0
     assert (tmp_path / "replay.txt").exists()
+
+
+def test_modifier_effect_runs_and_writes_report(tmp_path: Path, capsys) -> None:
+    args = build_parser().parse_args(["modifier-effect", "--out", str(tmp_path)])
+    assert cmd_modifier_effect(args) == 0
+    out = capsys.readouterr().out
+    assert "held representative: low" in out
+    assert "held representative: high" in out
+    assert "unique_count=0" in out
+    assert "unique_count=6" in out
+    assert "Any flip found across this whole grid" in out
+    assert (tmp_path / "modifier_effect.txt").exists()
+
+
+def test_modifier_effect_is_deterministic(tmp_path: Path, capsys) -> None:
+    args = build_parser().parse_args(["modifier-effect", "--out", str(tmp_path)])
+    cmd_modifier_effect(args)
+    first = capsys.readouterr().out
+    cmd_modifier_effect(args)
+    second = capsys.readouterr().out
+    assert first == second
