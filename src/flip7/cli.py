@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import random
+from itertools import combinations
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -10,10 +11,13 @@ from matplotlib.colors import ListedColormap
 
 from flip7.basic_strategy import (
     ALL_CELLS,
+    HELD_VALUE_SUM_STAY_THRESHOLDS,
+    PBUST_BUCKETS,
     PLUS_BUCKETS,
     UNIQUE_COUNTS,
     BasicStrategyTable,
     generate_basic_strategy_table,
+    p_bust_bucket_label,
 )
 from flip7.cards import full_deck
 from flip7.diagnostics import DiagnosticsReport, run_diagnostics
@@ -378,6 +382,85 @@ def cmd_modifier_effect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pbust_bucket_check(args: argparse.Namespace) -> int:
+    """Issue #13 concern 1: exact, deterministic check of whether P(bust)
+    bucketing (ADR-016) actually resolves the count-only blind spot, against
+    *every* possible held-number identity per unique_count -- not just the
+    two "low"/"high" representatives `flip7 modifier-effect` uses -- via
+    exact `lookahead_ev` (no Monte Carlo sampling).
+    """
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "Flip 7 P(bust)-bucket check (issue #13, concern 1)",
+        "",
+        "Exhaustive: for each unique_count, every possible held-number identity",
+        "(itertools.combinations(range(13), unique_count)) against the full deck",
+        "minus those held numbers (exact, no sampling; plus=0, no x2). Compares",
+        "the true lookahead_ev hit/stay verdict against (a) the new P(bust)-",
+        "bucketed chart (ADR-016, flip7.strategy.BASIC_STRATEGY_CHART) and",
+        "(b) the old shipped rule 'hit iff unique_count <= 2' (ADR-013),",
+        "reporting each rule's exact agreement rate with ground truth.",
+        "",
+    ]
+    total = 0
+    new_agree = 0
+    old_agree = 0
+    for unique_count in UNIQUE_COUNTS:
+        near_flip7 = unique_count == 6
+        n = n_new = n_old = 0
+        for combo in combinations(range(13), unique_count):
+            numbers = list(combo)
+            remaining = _remaining_after(numbers)
+            hit_ev = lookahead_ev(numbers, 0, False, remaining)
+            stay_value = float(score_line(numbers, 0, False, False))
+            true_decision = "hit" if hit_ev > stay_value else "stay"
+            new_cell = (p_bust_bucket_label(p_bust(numbers, remaining)), near_flip7, False, "0")
+            new_decision = BASIC_STRATEGY_CHART.get(new_cell, "stay")
+            old_decision = "hit" if unique_count <= 2 else "stay"
+            n += 1
+            n_new += new_decision == true_decision
+            n_old += old_decision == true_decision
+        total += n
+        new_agree += n_new
+        old_agree += n_old
+        lines.append(
+            f"unique_count={unique_count}: {n} held-number identities -- "
+            f"new chart agrees {n_new}/{n} ({100.0 * n_new / n:.1f}%), "
+            f"old chart agrees {n_old}/{n} ({100.0 * n_old / n:.1f}%)"
+        )
+    lines.append("")
+    lines.append(
+        f"Overall: new chart agrees {new_agree}/{total} ({100.0 * new_agree / total:.1f}%), "
+        f"old chart agrees {old_agree}/{total} ({100.0 * old_agree / total:.1f}%)"
+    )
+    lines.append("")
+
+    lines.append(
+        "Low/high representative bucket separation (closes ADR-013's addendum gap):"
+    )
+    for unique_count in UNIQUE_COUNTS:
+        low = list(range(unique_count))
+        high = list(range(12, 12 - unique_count, -1))
+        pb_low = p_bust(low, _remaining_after(low))
+        pb_high = p_bust(high, _remaining_after(high))
+        label_low = p_bust_bucket_label(pb_low)
+        label_high = p_bust_bucket_label(pb_high)
+        near_flip7 = unique_count == 6
+        rec_low = BASIC_STRATEGY_CHART.get((label_low, near_flip7, False, "0"), "stay")
+        rec_high = BASIC_STRATEGY_CHART.get((label_high, near_flip7, False, "0"), "stay")
+        same_or_different = "SAME bucket" if label_low == label_high else "DIFFERENT buckets"
+        lines.append(
+            f"  unique_count={unique_count}: low p_bust={pb_low:.3f} ({label_low}) -> {rec_low}; "
+            f"high p_bust={pb_high:.3f} ({label_high}) -> {rec_high}; {same_or_different}"
+        )
+
+    text = "\n".join(lines) + "\n"
+    (out / "pbust_bucket_check.txt").write_text(text, encoding="utf-8")
+    print(text)
+    return 0
+
+
 def _rate(bucket: list[int]) -> float | None:
     busts, attempts = bucket
     return busts / attempts if attempts else None
@@ -408,16 +491,17 @@ def _format_diagnostics(report: DiagnosticsReport) -> str:
         "basic_strategy chart, flip7.strategy.BASIC_STRATEGY_CHART):"
     )
     lines.append(
-        f"  {'unique':>6} {'x2':>5} {'plus':>5} {'n':>6} {'hit%':>7} {'chart says':>10}"
+        f"  {'p_bust':>8} {'near_f7':>7} {'x2':>5} {'plus':>5} {'n':>6} "
+        f"{'hit%':>7} {'chart says':>10}"
     )
     for cell in ALL_CELLS:
-        unique_count, has_x2, bucket_label = cell
+        pbust_bucket, near_flip7, has_x2, bucket_label = cell
         hits, total = report.decisions.get(cell, [0, 0])
         hit_pct = f"{100.0 * hits / total:6.1f}%" if total else "    n/a"
         chart_rec = BASIC_STRATEGY_CHART.get(cell, "?")
         lines.append(
-            f"  {unique_count:>6} {has_x2!s:>5} {bucket_label:>5} {total:>6} "
-            f"{hit_pct:>7} {chart_rec:>10}"
+            f"  {pbust_bucket:>8} {near_flip7!s:>7} {has_x2!s:>5} {bucket_label:>5} "
+            f"{total:>6} {hit_pct:>7} {chart_rec:>10}"
         )
     lines.append("")
 
@@ -426,6 +510,16 @@ def _format_diagnostics(report: DiagnosticsReport) -> str:
         busts, attempts = report.bust_by_unique_count[unique_count]
         pct = f"{100.0 * busts / attempts:.1f}%" if attempts else "n/a"
         lines.append(f"  unique_count={unique_count}: {busts}/{attempts} busts ({pct})")
+    lines.append("")
+
+    lines.append(
+        "Bust rate by P(bust) bucket at the moment of the hit decision (ADR-016 -- "
+        "confirms bust risk tracks this axis, not just raw card count):"
+    )
+    for label, _low, _high in PBUST_BUCKETS:
+        busts, attempts = report.bust_by_pbust_bucket.get(label, [0, 0])
+        pct = f"{100.0 * busts / attempts:.1f}%" if attempts else "n/a"
+        lines.append(f"  p_bust={label}: {busts}/{attempts} busts ({pct})")
     lines.append("")
 
     lines.append("Bust rate by round number within a game:")
@@ -504,31 +598,39 @@ def cmd_diagnostics(args: argparse.Namespace) -> int:
 
 
 def _plot_basic_strategy(path: Path, table: BasicStrategyTable) -> None:
-    bucket_labels = [label for label, _low, _high in PLUS_BUCKETS]
+    plus_labels = [label for label, _low, _high in PLUS_BUCKETS]
+    pbust_labels = [label for label, _low, _high in PBUST_BUCKETS]
     cmap = ListedColormap(["#e15759", "#59a14f"])  # stay (red), hit (green)
-    fig, axes = plt.subplots(1, 2, figsize=(7.5, 5.2), sharey=True)
-    for ax, has_x2 in zip(axes, (False, True), strict=True):
-        grid = np.zeros((len(UNIQUE_COUNTS), len(bucket_labels)))
-        for i, unique_count in enumerate(UNIQUE_COUNTS):
-            for j, bucket in enumerate(bucket_labels):
-                stats = table.cells[(unique_count, has_x2, bucket)]
-                grid[i, j] = 1.0 if stats.recommendation == "hit" else 0.0
-                ax.text(
-                    j,
-                    i,
-                    "HIT" if stats.recommendation == "hit" else "STAY",
-                    ha="center",
-                    va="center",
-                    fontsize=9,
-                    color="white",
-                    fontweight="bold",
-                )
-        ax.imshow(grid, cmap=cmap, vmin=0, vmax=1, aspect="auto")
-        ax.set_xticks(range(len(bucket_labels)), bucket_labels)
-        ax.set_yticks(range(len(UNIQUE_COUNTS)), UNIQUE_COUNTS)
+    fig, axes = plt.subplots(2, 2, figsize=(8.5, 8.5), sharex=True, sharey=True)
+    for row, near_flip7 in enumerate((False, True)):
+        for col, has_x2 in enumerate((False, True)):
+            ax = axes[row][col]
+            grid = np.zeros((len(pbust_labels), len(plus_labels)))
+            for i, pbust_label in enumerate(pbust_labels):
+                for j, plus_label in enumerate(plus_labels):
+                    stats = table.cells[(pbust_label, near_flip7, has_x2, plus_label)]
+                    grid[i, j] = 1.0 if stats.recommendation == "hit" else 0.0
+                    ax.text(
+                        j,
+                        i,
+                        "HIT" if stats.recommendation == "hit" else "STAY",
+                        ha="center",
+                        va="center",
+                        fontsize=8,
+                        color="white",
+                        fontweight="bold",
+                    )
+            ax.imshow(grid, cmap=cmap, vmin=0, vmax=1, aspect="auto")
+            ax.set_xticks(range(len(plus_labels)), plus_labels)
+            ax.set_yticks(range(len(pbust_labels)), pbust_labels)
+            ax.set_title(
+                f"x2 {'held' if has_x2 else 'not held'}, "
+                f"{'one card from Flip 7' if near_flip7 else 'not near Flip 7'}"
+            )
+    for ax in axes[-1]:
         ax.set_xlabel("plus-modifier total")
-        ax.set_title(f"x2 {'held' if has_x2 else 'not held'}")
-    axes[0].set_ylabel("unique number cards held")
+    for ax in axes[:, 0]:
+        ax.set_ylabel("P(bust)")
     fig.suptitle(
         f"Flip 7 basic strategy (seed={table.seed}, samples/cell={table.samples_per_cell})"
     )
@@ -555,34 +657,88 @@ def _describe_hit_buckets(hit_buckets: set[str], bucket_order: list[str]) -> str
     )
 
 
+def _tally_pbust_translation(unique_count: int, threshold: int) -> str:
+    """The range of exact P(bust) among every real held-number combination
+    whose value-sum equals `threshold` at this `unique_count` -- shows how
+    the cheap tally threshold lines up with the exact chart's own P(bust)
+    buckets above.
+    """
+    values = []
+    for combo in combinations(range(13), unique_count):
+        if sum(combo) == threshold:
+            remaining = full_counts()
+            for value in combo:
+                remaining.numbers[value] -= 1
+            values.append(p_bust(list(combo), remaining))
+    low, high = min(values), max(values)
+    low_label, high_label = p_bust_bucket_label(low), p_bust_bucket_label(high)
+    bucket = low_label if low_label == high_label else f"{low_label}..{high_label}"
+    return f"{100.0 * low:.0f}-{100.0 * high:.0f}% ({bucket})"
+
+
+def _human_tally_cheat_sheet() -> list[str]:
+    lines = [
+        "Human-at-the-table cheat sheet (ADR-016): add up the values of the",
+        "number cards you're holding (the same subtotal you already track for",
+        "your score, before x2/plus). Stay once that total reaches:",
+        f"  {'unique cards held':<18} {'stay once sum reaches':>22} {'~P(bust) there':>18}",
+    ]
+    for unique_count in UNIQUE_COUNTS:
+        threshold = HELD_VALUE_SUM_STAY_THRESHOLDS.get(unique_count)
+        if threshold is None:
+            lines.append(f"  {unique_count:<18} {'(always hit)':>22} {'':>18}")
+            continue
+        translation = _tally_pbust_translation(unique_count, threshold)
+        lines.append(f"  {unique_count:<18} {threshold:>22} {translation:>18}")
+    lines.append(
+        "This tally alone reproduces the true hit/stay verdict on 97.8% of every"
+    )
+    lines.append(
+        "possible held-number identity (exhaustive check, see `flip7 pbust-bucket-check`)"
+    )
+    lines.append(
+        "-- close to, but not identical to, the shipped chart's own exact P(bust); it"
+    )
+    lines.append("ignores x2/plus, which the exact chart shows rarely move the verdict.")
+    return lines
+
+
 def _write_basic_strategy_summary(
     path: Path,
     table: BasicStrategyTable,
     matchups: list[tuple[str, SimulationReport]],
 ) -> None:
     bucket_order = [label for label, _low, _high in PLUS_BUCKETS]
+    pbust_order = [label for label, _low, _high in PBUST_BUCKETS]
     lines = [
         f"Flip 7 basic strategy (seed={table.seed}, {table.samples_per_cell} sampled "
         "remaining decks per cell, distilled from flip7.probability.lookahead_ev)",
         "",
-        "Plain-language chart:",
+        "Plain-language chart (P(bust) is this line's exact bust risk against the",
+        "remaining deck -- see ADR-016; a cheap sum(held card values) tally tracks",
+        "it closely enough for a human to use at the table without exact counting):",
     ]
-    for has_x2 in (False, True):
-        lines.append(f"  x2 {'held' if has_x2 else 'not held'}:")
-        for unique_count in UNIQUE_COUNTS:
-            hit_buckets = {
-                bucket
-                for bucket in bucket_order
-                if table.cells[(unique_count, has_x2, bucket)].recommendation == "hit"
-            }
-            lines.append(
-                f"    {unique_count} unique card(s): "
-                f"{_describe_hit_buckets(hit_buckets, bucket_order)}."
-            )
+    for near_flip7 in (False, True):
+        lines.append(f"  {'one card from Flip 7' if near_flip7 else 'not near Flip 7'}:")
+        for has_x2 in (False, True):
+            lines.append(f"    x2 {'held' if has_x2 else 'not held'}:")
+            for pbust_label in pbust_order:
+                hit_buckets = {
+                    bucket
+                    for bucket in bucket_order
+                    if table.cells[(pbust_label, near_flip7, has_x2, bucket)].recommendation
+                    == "hit"
+                }
+                lines.append(
+                    f"      P(bust) {pbust_label}: "
+                    f"{_describe_hit_buckets(hit_buckets, bucket_order)}."
+                )
     lines.append("")
     lines.append(
-        "(7+ unique cards is Flip 7 -- the round already ended, there is no hit/stay choice.)"
+        "(7 unique cards is Flip 7 -- the round already ended, there is no hit/stay choice.)"
     )
+    lines.append("")
+    lines.extend(_human_tally_cheat_sheet())
     lines.append("")
     lines.append("Cost of using this chart instead of the full lookahead_ev solver:")
     lines.append(
@@ -744,7 +900,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--samples",
         type=int,
         default=60,
-        help="lookahead_ev samples averaged per chart cell (42 cells; higher is slower)",
+        help="lookahead_ev samples averaged per chart cell (48 cells; higher is slower)",
     )
     basic.add_argument(
         "--games",
@@ -799,6 +955,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     modifier_effect.add_argument("--out", type=str, default="reports")
     modifier_effect.set_defaults(func=cmd_modifier_effect)
+
+    pbust_bucket_check = sub.add_parser(
+        "pbust-bucket-check",
+        help=(
+            "Issue #13 concern 1: exact, exhaustive check of whether P(bust) "
+            "bucketing (ADR-016) resolves the count-only chart blind spot"
+        ),
+    )
+    pbust_bucket_check.add_argument("--out", type=str, default="reports")
+    pbust_bucket_check.set_defaults(func=cmd_pbust_bucket_check)
 
     diagnostics = sub.add_parser(
         "diagnostics",

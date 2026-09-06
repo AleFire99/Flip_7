@@ -5,7 +5,7 @@ from random import Random
 from typing import Protocol, runtime_checkable
 
 from flip7.cards import Card, CardKind, full_deck
-from flip7.probability import DeckCounts, remaining_from_deck
+from flip7.probability import DeckCounts, p_bust, remaining_from_deck
 from flip7.scoring import TARGET_SCORE
 from flip7.state import PlayerLine
 
@@ -90,11 +90,12 @@ class TraceEvent:
     ``card``, ``outcome``, and -- for Freeze/Flip Three -- ``target``/
     ``target_via``), ``"round_end"`` (``round_no``, ``scores``, ``totals``,
     ``flip7_seat``), or ``"decide"`` (``round_no``, ``seat``, ``decision``,
-    ``state_unique_count``, ``state_has_x2``, ``state_plus`` -- the *real*
-    game state a `Policy.decide` call actually saw, one event per call,
-    issue #14's diagnostics build on this). Left as one flat dataclass
-    rather than a union of per-kind classes since callers just want to
-    append events to a list and read them back in order.
+    ``state_unique_count``, ``state_has_x2``, ``state_plus``, ``state_p_bust``
+    -- the *real* game state a `Policy.decide` call actually saw, one event
+    per call, issue #14's diagnostics build on this; ``state_p_bust`` was
+    added for ADR-016's P(bust)-bucketed chart axis). Left as one flat
+    dataclass rather than a union of per-kind classes since callers just
+    want to append events to a list and read them back in order.
     """
 
     kind: str
@@ -112,6 +113,7 @@ class TraceEvent:
     state_unique_count: int | None = None
     state_has_x2: bool | None = None
     state_plus: int | None = None
+    state_p_bust: float | None = None
 
 
 @dataclass
@@ -339,6 +341,7 @@ def play_round(
                 state_unique_count=line.unique_count,
                 state_has_x2=line.has_x2,
                 state_plus=line.plus,
+                state_p_bust=p_bust(line.numbers, view.remaining),
             )
             if actual_decision == "stay":
                 line.stayed = True

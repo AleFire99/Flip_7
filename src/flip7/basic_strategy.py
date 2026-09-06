@@ -6,16 +6,33 @@ from itertools import combinations, product
 from random import Random
 
 from flip7.cards import NUMBER_COUNTS, PLUS_VALUES
-from flip7.probability import DeckCounts, full_counts, lookahead_ev
+from flip7.probability import DeckCounts, full_counts, lookahead_ev, p_bust
 from flip7.scoring import score_line
 
-#: A chartable state: (unique number cards held, capped at 6; whether x2 is
-#: held; a coarse label for the current plus-modifier total). Flip 7 (7
-#: unique numbers) never reaches a hit/stay decision -- the round already
-#: ended -- so 6 is the largest chartable count.
-Cell = tuple[int, bool, str]
+#: A chartable state: (a coarse label for this line's exact P(bust) against
+#: the remaining deck; whether this hand is one card from Flip 7 -- the +15
+#: bonus shifts the safe threshold independently of bust risk, so it stays a
+#: distinct axis rather than being folded back into a raw card count; whether
+#: x2 is held; a coarse label for the current plus-modifier total). See
+#: docs/DECISIONS.md ADR-016: this replaces raw unique_count as the primary
+#: axis, which collapsed low-risk and high-risk hands of the same card count
+#: into the same cell (ADR-013's addendum).
+Cell = tuple[str, bool, bool, str]
 
 UNIQUE_COUNTS: tuple[int, ...] = (0, 1, 2, 3, 4, 5, 6)
+
+#: Coarse P(bust) buckets (label, inclusive lower bound, exclusive upper
+#: bound). Boundaries (10%/27%/40%) were picked from an exhaustive sweep over
+#: every possible held-number identity at every unique_count (ADR-016): a
+#: bucketed rule crossed with `near_flip7` reproduces the true lookahead_ev
+#: hit/stay verdict on ~97% of all such states, against ~82% for the best
+#: possible single global P(bust) threshold with no near_flip7 split.
+PBUST_BUCKETS: tuple[tuple[str, float, float], ...] = (
+    ("<10%", 0.00, 0.10),
+    ("10-27%", 0.10, 0.27),
+    ("27-40%", 0.27, 0.40),
+    ("40%+", 0.40, 1.01),
+)
 
 #: Coarse plus-total buckets (label, inclusive lower bound, inclusive upper
 #: bound). Three buckets, not more: ADR-013 picks this over a finer split so
@@ -28,12 +45,36 @@ PLUS_BUCKETS: tuple[tuple[str, int, int], ...] = (
     ("6+", 6, 10_000),
 )
 
-#: Every (unique_count, has_x2, plus_bucket) cell in chart order: rows first
-#: by unique_count, then has_x2, then plus bucket. 7 * 2 * 3 = 42 cells.
+#: Every (pbust_bucket, near_flip7, has_x2, plus_bucket) cell in chart order.
+#: 4 * 2 * 2 * 3 = 48 cells. One cell, ("<10%", True, *, *), is structurally
+#: unreachable: the minimum possible P(bust) at unique_count=6 is ~12.7% (the
+#: smallest 6 held values are 0-5, all singly-copied or barely-duplicated,
+#: but still nonzero) -- kept for grid uniformity. `_closest_fixed_k_numbers`
+#: samples the closest achievable state to it (the 6 least-duplicated
+#: values), whose true verdict is "hit" -- so this cell reads "hit" too, even
+#: though `BasicStrategy.decide` never actually looks it up in real play.
 ALL_CELLS: tuple[Cell, ...] = tuple(
-    (unique_count, has_x2, bucket[0])
-    for unique_count, has_x2, bucket in product(UNIQUE_COUNTS, (False, True), PLUS_BUCKETS)
+    (pbust_bucket[0], near_flip7, has_x2, plus_bucket[0])
+    for pbust_bucket, near_flip7, has_x2, plus_bucket in product(
+        PBUST_BUCKETS, (False, True), (False, True), PLUS_BUCKETS
+    )
 )
+
+
+def p_bust_bucket_label(p: float) -> str:
+    """Classify an exact P(bust) fraction into one of `PBUST_BUCKETS`."""
+    for label, low, high in PBUST_BUCKETS:
+        if low <= p < high:
+            return label
+    return PBUST_BUCKETS[-1][0]
+
+
+def _pbust_bucket_bounds(label: str) -> tuple[float, float]:
+    for cand_label, low, high in PBUST_BUCKETS:
+        if cand_label == label:
+            return low, high
+    msg = f"unknown p_bust bucket: {label!r}"
+    raise ValueError(msg)
 
 
 def plus_bucket_label(plus_total: int) -> str:
@@ -50,6 +91,38 @@ def _bucket_bounds(label: str) -> tuple[int, int]:
             return low, high
     msg = f"unknown plus bucket: {label!r}"
     raise ValueError(msg)
+
+
+#: A cheap, human-at-the-table approximation of P(bust): the plain sum of
+#: this line's held number-card values (the same subtotal `score_line`
+#: already computes before x2/plus/the Flip 7 bonus). Maps unique cards
+#: held -> the sum at which the true lookahead_ev verdict flips from hit to
+#: stay (`None` means no in-range sum flips it -- always hit). Picked by an
+#: exhaustive sweep over every possible held-number identity at every
+#: unique_count (ADR-016): the best single threshold per count reproduces
+#: the true verdict on 97.8% of all 4096 states -- tighter than one flat
+#: threshold for every count, still just 5 numbers to memorize. Documentation
+#: only: `BasicStrategy.decide` uses exact P(bust) instead (see `Cell`).
+HELD_VALUE_SUM_STAY_THRESHOLDS: dict[int, int | None] = {
+    0: None,
+    1: None,
+    2: 23,
+    3: 24,
+    4: 25,
+    5: 27,
+    6: 36,
+}
+
+
+def tally_recommend(unique_count: int, held_value_sum: int) -> str:
+    """The cheap human tally's own recommendation (ADR-016), ignoring
+    x2/plus -- the exact chart shows those rarely move the verdict. Not
+    used by `BasicStrategy.decide`; for the printed cheat sheet only.
+    """
+    threshold = HELD_VALUE_SUM_STAY_THRESHOLDS.get(min(unique_count, 6))
+    if threshold is None:
+        return "hit"
+    return "stay" if held_value_sum >= threshold else "hit"
 
 
 def _sample_held_numbers(rng: Random, unique_count: int) -> list[int]:
@@ -158,6 +231,90 @@ def _sample_remaining_deck(
     return deck
 
 
+def _closest_fixed_k_numbers(low: float, high: float, k: int) -> list[int]:
+    """For a *fixed* held count `k` (the `near_flip7` case), P(bust) doesn't
+    grow incrementally -- it's fully determined by which `k` values are
+    held. If the target bucket `[low, high)` is unreachable at this exact
+    `k` in either direction (e.g. "<10%" at `k=6`, whose true minimum P(bust)
+    is ~12.7% -- even the 6 least-duplicated values can't get below that),
+    picks whichever extreme (least- or most-duplicated `k` values) lands
+    closest to the bucket, rather than an arbitrary one: if the bucket were
+    reachable, that's the state nearest to actually landing in it, and its
+    true hit/stay verdict is the most defensible stand-in.
+    """
+
+    def distance(numbers: list[int]) -> float:
+        remaining = full_counts()
+        for value in numbers:
+            remaining.numbers[value] -= 1
+        pb = p_bust(numbers, remaining)
+        if pb < low:
+            return low - pb
+        if pb >= high:
+            return pb - high
+        return 0.0
+
+    ranked = sorted(NUMBER_COUNTS, key=lambda v: NUMBER_COUNTS[v])
+    ascending = ranked[:k]
+    descending = ranked[::-1][:k]
+    return min((ascending, descending), key=distance)
+
+
+def _greedy_held_numbers_for_bucket(
+    low: float, high: float, *, require_exact_k: int | None, k_cap: int
+) -> list[int]:
+    """Deterministic fallback used when rejection sampling misses.
+
+    Not `near_flip7` (`require_exact_k` is `None`): greedily adds the deck's
+    most-duplicated values (each addition raises P(bust) fastest) until the
+    bucket is entered or `k_cap` is reached -- guaranteed to terminate since
+    `k_cap` is finite.
+
+    `near_flip7` (`require_exact_k` set): delegates to
+    `_closest_fixed_k_numbers`, since a fixed held count can't be grown
+    incrementally.
+    """
+    if require_exact_k is not None:
+        return _closest_fixed_k_numbers(low, high, require_exact_k)
+    candidates = sorted(NUMBER_COUNTS, key=lambda v: -NUMBER_COUNTS[v])
+    numbers: list[int] = []
+    remaining = full_counts()
+    for value in candidates:
+        numbers.append(value)
+        remaining.numbers[value] -= 1
+        if low <= p_bust(numbers, remaining) < high or len(numbers) == k_cap:
+            break
+    return numbers
+
+
+def _sample_held_and_remaining_for_bucket(
+    rng: Random,
+    pbust_label: str,
+    near_flip7: bool,
+    plus_cards: list[int],
+    has_x2: bool,
+    *,
+    max_attempts: int = 300,
+) -> tuple[list[int], DeckCounts]:
+    """Sample held numbers + a remaining deck whose exact P(bust) lands in
+    `pbust_label`'s bucket, rejection-sampling first and falling back to a
+    deterministic greedy search (guaranteed to terminate) if none of the
+    random draws land in range -- the same shape as `_sample_plus_subset`.
+    """
+    low, high = _pbust_bucket_bounds(pbust_label)
+    for _ in range(max_attempts):
+        k = 6 if near_flip7 else rng.randint(0, 5)
+        numbers = _sample_held_numbers(rng, k)
+        remaining = _sample_remaining_deck(rng, numbers, plus_cards, has_x2)
+        if low <= p_bust(numbers, remaining) < high:
+            return numbers, remaining
+    numbers = _greedy_held_numbers_for_bucket(
+        low, high, require_exact_k=6 if near_flip7 else None, k_cap=5
+    )
+    remaining = _sample_remaining_deck(rng, numbers, plus_cards, has_x2)
+    return numbers, remaining
+
+
 def _cache_key(
     numbers: list[int], plus_total: int, has_x2: bool, remaining: DeckCounts
 ) -> tuple[object, ...]:
@@ -201,21 +358,22 @@ def evaluate_cell(
     """Average `lookahead_ev`'s hit/stay verdict over `samples_per_cell` decks.
 
     A representative sample is drawn fresh each time (see
-    `_sample_held_numbers`/`_sample_plus_subset`/`_sample_remaining_deck`);
-    `cache` memoizes `lookahead_ev` itself (keyed on a hashable reduction of
-    its inputs, per `_cache_key`) so repeated samples that happen to land on
-    the same effective state -- common for small/empty cells such as
-    unique_count=0 -- are not recomputed.
+    `_sample_held_and_remaining_for_bucket`/`_sample_plus_subset`); `cache`
+    memoizes `lookahead_ev` itself (keyed on a hashable reduction of its
+    inputs, per `_cache_key`) so repeated samples that happen to land on the
+    same effective state -- common for small/empty cells -- are not
+    recomputed.
     """
-    unique_count, has_x2, bucket_label = cell
+    pbust_bucket, near_flip7, has_x2, bucket_label = cell
     hit_votes = 0
     hit_ev_sum = 0.0
     stay_sum = 0.0
     for _ in range(samples_per_cell):
-        numbers = _sample_held_numbers(rng, unique_count)
         plus_cards = _sample_plus_subset(rng, bucket_label)
         plus_total = sum(plus_cards)
-        remaining = _sample_remaining_deck(rng, numbers, plus_cards, has_x2)
+        numbers, remaining = _sample_held_and_remaining_for_bucket(
+            rng, pbust_bucket, near_flip7, plus_cards, has_x2
+        )
 
         key = _cache_key(numbers, plus_total, has_x2, remaining)
         hit_ev = cache.get(key)
@@ -252,8 +410,15 @@ class BasicStrategyTable:
         """`{cell: "hit" | "stay"}` -- the memorizable part of the table."""
         return {cell: stats.recommendation for cell, stats in self.cells.items()}
 
-    def recommend(self, unique_count: int, has_x2: bool, plus_total: int) -> str:
-        cell = (min(unique_count, 6), has_x2, plus_bucket_label(plus_total))
+    def recommend(
+        self, numbers: list[int], has_x2: bool, plus_total: int, remaining: DeckCounts
+    ) -> str:
+        cell: Cell = (
+            p_bust_bucket_label(p_bust(numbers, remaining)),
+            len(numbers) == 6,
+            has_x2,
+            plus_bucket_label(plus_total),
+        )
         stats = self.cells.get(cell)
         return stats.recommendation if stats is not None else "stay"
 
@@ -263,7 +428,7 @@ def generate_basic_strategy_table(
     samples_per_cell: int = 6,
     cells: Sequence[Cell] | None = None,
 ) -> BasicStrategyTable:
-    """Distill `lookahead_ev` into a small hit/stay chart (ADR-013).
+    """Distill `lookahead_ev` into a small hit/stay chart (ADR-013, ADR-016).
 
     Deterministic in `seed`: a fixed `Random(seed)` is consumed in a fixed
     order (chart-row order over `ALL_CELLS`, or the caller's `cells`), so the

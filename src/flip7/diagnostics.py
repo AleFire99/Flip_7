@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from random import Random
 
-from flip7.basic_strategy import Cell, plus_bucket_label
+from flip7.basic_strategy import Cell, p_bust_bucket_label, plus_bucket_label
 from flip7.engine import Policy, TraceEvent, play_game
 from flip7.scoring import TARGET_SCORE
 
@@ -24,12 +24,19 @@ class DiagnosticsReport:
     n_games: int
     n_players: int
     seed: int
-    #: cell -> (hit decisions, total decisions) at that (unique_count capped
-    #: at 6, has_x2, plus_bucket) cell -- the empirical counterpart to
-    #: `flip7.basic_strategy.ALL_CELLS`.
+    #: cell -> (hit decisions, total decisions) at that (pbust_bucket,
+    #: near_flip7, has_x2, plus_bucket) cell -- the empirical counterpart to
+    #: `flip7.basic_strategy.ALL_CELLS` (ADR-016).
     decisions: dict[Cell, list[int]] = field(default_factory=lambda: defaultdict(lambda: [0, 0]))
     #: unique_count (at decision time) -> (busts, hit attempts)
     bust_by_unique_count: dict[int, list[int]] = field(
+        default_factory=lambda: defaultdict(lambda: [0, 0])
+    )
+    #: p_bust bucket label (at decision time) -> (busts, hit attempts) --
+    #: added alongside `bust_by_unique_count` for ADR-016, to confirm bust
+    #: rate actually correlates with the new primary chart axis, not just
+    #: with raw card count.
+    bust_by_pbust_bucket: dict[str, list[int]] = field(
         default_factory=lambda: defaultdict(lambda: [0, 0])
     )
     #: round number within a game -> (busts, hit attempts)
@@ -41,8 +48,8 @@ class DiagnosticsReport:
     totals: list[int] = field(default_factory=list)
 
 
-def _cell_for(unique_count: int, has_x2: bool, plus: int) -> Cell:
-    return (min(unique_count, 6), has_x2, plus_bucket_label(plus))
+def _cell_for(p_bust_value: float, unique_count: int, has_x2: bool, plus: int) -> Cell:
+    return (p_bust_bucket_label(p_bust_value), unique_count == 6, has_x2, plus_bucket_label(plus))
 
 
 def _find_own_draw(trace: list[TraceEvent], start: int, seat: int) -> TraceEvent | None:
@@ -65,7 +72,10 @@ def process_trace(report: DiagnosticsReport, trace: list[TraceEvent]) -> None:
         assert event.state_unique_count is not None
         assert event.state_has_x2 is not None
         assert event.state_plus is not None
-        cell = _cell_for(event.state_unique_count, event.state_has_x2, event.state_plus)
+        assert event.state_p_bust is not None
+        cell = _cell_for(
+            event.state_p_bust, event.state_unique_count, event.state_has_x2, event.state_plus
+        )
         counts = report.decisions[cell]
         counts[1] += 1
         if event.decision != "hit":
@@ -80,6 +90,10 @@ def process_trace(report: DiagnosticsReport, trace: list[TraceEvent]) -> None:
         uc_bucket = report.bust_by_unique_count[event.state_unique_count]
         uc_bucket[1] += 1
         uc_bucket[0] += busted
+
+        pbust_bucket = report.bust_by_pbust_bucket[p_bust_bucket_label(event.state_p_bust)]
+        pbust_bucket[1] += 1
+        pbust_bucket[0] += busted
 
         round_bucket = report.bust_by_round[event.round_no]
         round_bucket[1] += 1
