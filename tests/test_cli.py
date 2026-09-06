@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from flip7.cli import build_parser, cmd_analyze, cmd_basic_strategy, cmd_compare, cmd_ev_table
+from flip7.cli import (
+    build_parser,
+    cmd_analyze,
+    cmd_basic_strategy,
+    cmd_compare,
+    cmd_ev_table,
+    cmd_replay,
+)
 
 
 def test_parser_analyze_defaults() -> None:
@@ -191,3 +198,44 @@ def test_basic_strategy_rejects_unknown_baseline(tmp_path: Path) -> None:
         assert "unknown baseline policy" in str(exc)
     else:
         raise AssertionError("expected SystemExit for an unknown baseline policy name")
+
+
+def test_replay_runs_and_writes_trace(tmp_path: Path, capsys) -> None:
+    args = build_parser().parse_args(
+        [
+            "replay",
+            "--seed",
+            "1",
+            "--out",
+            str(tmp_path),
+            "--target",
+            "1",
+            "--max-rounds",
+            "2",
+        ]
+    )
+    assert cmd_replay(args) == 0
+    out = capsys.readouterr().out
+    assert "Round 1" in out
+    assert (tmp_path / "replay.txt").exists()
+    assert "Round 1" in (tmp_path / "replay.txt").read_text(encoding="utf-8")
+
+
+def test_replay_supports_the_94_card_action_card_deck(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "replay",
+            "--seed",
+            "1",
+            "--out",
+            str(tmp_path),
+            "--deck",
+            "94",
+            "--target",
+            "1",
+            "--max-rounds",
+            "2",
+        ]
+    )
+    assert cmd_replay(args) == 0
+    assert (tmp_path / "replay.txt").exists()

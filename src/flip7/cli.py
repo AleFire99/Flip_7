@@ -15,7 +15,7 @@ from flip7.basic_strategy import (
     generate_basic_strategy_table,
 )
 from flip7.cards import full_deck
-from flip7.engine import Policy, play_round
+from flip7.engine import Policy, TraceEvent, play_game, play_round
 from flip7.probability import (
     lookahead_ev,
     one_step_ev,
@@ -216,6 +216,62 @@ def cmd_ev_table(args: argparse.Namespace) -> int:
             f"one-step EV={ev:.2f} -> {'HIT' if ev > stay else 'STAY'} | "
             f"lookahead EV={dp_ev:.2f} -> {'HIT' if dp_ev > stay else 'STAY'}"
         )
+    return 0
+
+
+def _format_trace_event(event: TraceEvent) -> str:
+    if event.kind == "round_start":
+        return f"=== Round {event.round_no} (dealer: seat {event.dealer}) ==="
+    if event.kind == "round_end":
+        return (
+            f"  Round {event.round_no} end: scores={event.scores} "
+            f"totals={event.totals} flip7={event.flip7_seat}"
+        )
+    verb = "deals" if event.kind == "deal" else "hits"
+    if event.card is None:
+        return f"  seat {event.seat} stays"
+    if event.card == "Freeze":
+        return (
+            f"  seat {event.seat} {verb}: Freeze -> targets seat {event.target} "
+            f"({event.target_via}); seat {event.target} stays"
+        )
+    if event.card == "Flip Three":
+        return (
+            f"  seat {event.seat} {verb}: Flip Three -> targets seat {event.target} "
+            f"({event.target_via})"
+        )
+    if event.card == "Second Chance":
+        if event.target is not None:
+            return f"  seat {event.seat} {verb}: Second Chance -> passed to seat {event.target}"
+        return f"  seat {event.seat} {verb}: Second Chance (held)"
+    return f"  seat {event.seat} {verb}: {event.card} ({event.outcome})"
+
+
+def _format_trace(events: list[TraceEvent]) -> str:
+    return "\n".join(_format_trace_event(event) for event in events) + "\n"
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    if args.policies:
+        names = [name.strip() for name in args.policies.split(",") if name.strip()]
+        policies = _resolve_policies(names)
+    else:
+        policies = [StayAfterDeal(), StayAfterDeal(), StayAfterDeal()]
+    rng = random.Random(args.seed)
+    trace: list[TraceEvent] = []
+    play_game(
+        policies,
+        rng,
+        target=args.target,
+        max_rounds=args.max_rounds,
+        use_action_cards=(args.deck == 94),
+        trace=trace,
+    )
+    text = _format_trace(trace)
+    (out / "replay.txt").write_text(text, encoding="utf-8")
+    print(text)
     return 0
 
 
@@ -482,6 +538,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     basic.add_argument("--max-rounds", type=int, default=400, dest="max_rounds")
     basic.set_defaults(func=cmd_basic_strategy)
+
+    replay = sub.add_parser(
+        "replay",
+        help="Print a turn-by-turn trace of one game for manual rule verification",
+    )
+    replay.add_argument("--seed", type=int, default=1)
+    replay.add_argument("--out", type=str, default="reports")
+    replay.add_argument(
+        "--policies",
+        type=str,
+        default=None,
+        help="Comma-separated policy names (see 'flip7 policies'); default: 3x stay_after_deal",
+    )
+    replay.add_argument(
+        "--deck",
+        type=int,
+        choices=(85, 94),
+        default=85,
+        help="85 (Phase 1, no action cards) or 94 (Phase 2, with Freeze/Flip Three/Second Chance)",
+    )
+    replay.add_argument("--target", type=int, default=TARGET_SCORE)
+    replay.add_argument("--max-rounds", type=int, default=400, dest="max_rounds")
+    replay.set_defaults(func=cmd_replay)
 
     return parser
 
