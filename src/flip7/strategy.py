@@ -350,7 +350,7 @@ class BasicStrategyTally:
 
     def decide(self, view: TableView) -> str:
         line = view.lines[view.acting]
-        return tally_recommend(line.unique_count, sum(line.numbers))
+        return tally_recommend(line.unique_count, sum(line.numbers), line.has_x2, line.plus)
 
 
 def named_policies() -> dict[str, Policy]:

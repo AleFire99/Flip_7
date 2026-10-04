@@ -14,13 +14,14 @@ from matplotlib.colors import ListedColormap
 
 from flip7.basic_strategy import (
     ALL_CELLS,
-    HELD_VALUE_SUM_STAY_THRESHOLDS,
     PBUST_BUCKETS,
     PLUS_BUCKETS,
+    TALLY_STAY_THRESHOLDS,
     UNIQUE_COUNTS,
     BasicStrategyTable,
     generate_basic_strategy_table,
     p_bust_bucket_label,
+    tally_threshold,
 )
 from flip7.cards import full_deck
 from flip7.diagnostics import DiagnosticsReport, run_diagnostics
@@ -808,43 +809,34 @@ def _describe_hit_buckets(hit_buckets: set[str], bucket_order: list[str]) -> str
     )
 
 
-def _tally_pbust_translation(unique_count: int, threshold: int) -> str:
-    """The range of exact P(bust) among every real held-number combination
-    whose value-sum equals `threshold` at this `unique_count` -- shows how
-    the cheap tally threshold lines up with the exact chart's own P(bust)
-    buckets above.
-    """
-    values = []
-    for combo in combinations(range(13), unique_count):
-        if sum(combo) == threshold:
-            remaining = full_counts()
-            for value in combo:
-                remaining.numbers[value] -= 1
-            values.append(p_bust(list(combo), remaining))
-    low, high = min(values), max(values)
-    low_label, high_label = p_bust_bucket_label(low), p_bust_bucket_label(high)
-    bucket = low_label if low_label == high_label else f"{low_label}..{high_label}"
-    return f"{100.0 * low:.0f}-{100.0 * high:.0f}% ({bucket})"
-
-
 def _human_tally_cheat_sheet() -> list[str]:
     lines = [
-        "Human-at-the-table cheat sheet (ADR-016): add up the values of the",
-        "number cards you're holding (the same subtotal you already track for",
-        "your score, before x2/plus). Stay once that total reaches:",
-        f"  {'unique cards held':<18} {'stay once sum reaches':>22} {'~P(bust) there':>18}",
+        "Human-at-the-table cheat sheet (ADR-016, ADR-022). No probabilities needed:",
+        "add up the values of the NUMBER cards you hold (ignore +/x2 cards in the sum),",
+        "count how many different numbers you hold, then STAY once the sum reaches:",
+        "",
+        f"  {'different numbers':<18} {'no x2':^20} {'x2 held':^20}",
+        f"  {'held':<18} {'+0':>6} {'+1-5':>6} {'+6+':>6}  {'+0':>6} {'+1-5':>6} {'+6+':>6}",
     ]
+    buckets = [label for label, _low, _high in PLUS_BUCKETS]
     for unique_count in UNIQUE_COUNTS:
-        threshold = HELD_VALUE_SUM_STAY_THRESHOLDS.get(unique_count)
-        if threshold is None:
-            lines.append(f"  {unique_count:<18} {'(always hit)':>22} {'':>18}")
+        if tally_threshold(unique_count) is None:
+            lines.append(f"  {unique_count:<18} {'always HIT':^20} {'always HIT':^20}")
             continue
-        translation = _tally_pbust_translation(unique_count, threshold)
-        lines.append(f"  {unique_count:<18} {threshold:>22} {translation:>18}")
-    lines.append("This tally alone reproduces the true hit/stay verdict on 97.8% of every")
-    lines.append("possible held-number identity (exhaustive check, see `flip7 pbust-bucket-check`)")
-    lines.append("-- close to, but not identical to, the shipped chart's own exact P(bust); it")
-    lines.append("ignores x2/plus, which the exact chart shows rarely move the verdict.")
+        cells = [
+            [str(TALLY_STAY_THRESHOLDS[(unique_count, x2, b)]) for b in buckets]
+            for x2 in (False, True)
+        ]
+        label = f"{unique_count}" + (" (1 from Flip 7)" if unique_count == 6 else "")
+        lines.append(
+            f"  {label:<18} {cells[0][0]:>6} {cells[0][1]:>6} {cells[0][2]:>6}  "
+            f"{cells[1][0]:>6} {cells[1][1]:>6} {cells[1][2]:>6}"
+        )
+    lines.append("")
+    lines.append("'+0/+1-5/+6+' is the total of +2/+4/+6/+8/+10 cards you hold. With 0 or 1")
+    lines.append("different numbers, always hit. Below the threshold, hit. At 7 different")
+    lines.append("numbers the round is already over (Flip 7). Thresholds are fitted to the")
+    lines.append("exact lookahead_ev verdict (97-100% agreement per row, ADR-022).")
     return lines
 
 

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from flip7.basic_strategy import (
     ALL_CELLS,
-    HELD_VALUE_SUM_STAY_THRESHOLDS,
     MIN_HIT_EV_MARGIN,
     PBUST_BUCKETS,
     PLUS_BUCKETS,
+    TALLY_STAY_THRESHOLDS,
     generate_basic_strategy_table,
     p_bust_bucket_label,
     plus_bucket_label,
@@ -140,8 +140,17 @@ def test_tally_recommend_matches_the_documented_thresholds() -> None:
     assert tally_recommend(6, 36) == "stay"
 
 
-def test_held_value_sum_thresholds_cover_every_unique_count() -> None:
-    assert set(HELD_VALUE_SUM_STAY_THRESHOLDS) == set(range(7))
+def test_tally_table_covers_every_count_x2_and_plus_bucket() -> None:
+    assert set(TALLY_STAY_THRESHOLDS) == {
+        (k, x2, b) for k in range(2, 7) for x2 in (False, True) for b in ("0", "1-5", "6+")
+    }
+
+
+def test_tally_recommend_uses_x2_and_plus_to_stop_earlier() -> None:
+    assert tally_recommend(6, 33) == "hit"
+    assert tally_recommend(6, 31, has_x2=True) == "stay"  # x2 one card from Flip 7
+    assert tally_recommend(2, 22) == "hit"
+    assert tally_recommend(2, 20, plus_total=8) == "stay"  # +6 or more
 
 
 def test_recommend_falls_back_to_stay_for_an_uncharted_cell() -> None:

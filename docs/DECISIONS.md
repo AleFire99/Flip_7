@@ -281,3 +281,13 @@ Shipping all 7 dropped `basic_strategy` to 33.0% [31.9, 34.1] against `one_step_
 **Verification:** with zero action cards the new DP equals the Phase 1 DP to 1e-9 on random states; Second Chance flips `{12, 11}` against a 12/11-heavy deck from stay to hit; hand `{12,11,10}` hit EV rises 33.0 -> 42.0 and `{9,5,3}` 21.8 -> 37.8 when holding a Second Chance. `compare_paired` gained `use_action_cards`.
 
 **Not done (follow-up):** a `has_second_chance` axis on the basic-strategy chart and its re-measurement.
+
+## ADR-022: Tally cheat sheet keyed on unique cards, x2 and plus total (issue #31)
+
+**Context:** The human tally (ADR-016/019) used one threshold per unique-card count and ignored `x2`/`+` cards, because the exact chart showed them rarely moving the verdict. A player at the table still needs to know what to do with an `x2` or a near-Flip-7 hand, and could not read the P(bust)-bucket chart (no probability counting at the table).
+
+**Decision:** `TALLY_STAY_THRESHOLDS[(unique_count, has_x2, plus_bucket)]` (30 entries; 0-1 unique cards always hit). For every held-number identity of 0-6 numbers (4,096) x x2 on/off x representative `+` totals (0, 4, 8) -- 24,576 exact `lookahead_ev` verdicts against the fresh deck minus the held cards -- the best "stay once sum >= T" threshold was fitted per row (96.8-100% agreement). `tally_recommend(unique_count, held_sum, has_x2=False, plus_total=0)` and `BasicStrategyTally` use it; the one-page sheet is `docs/TALLY_CHEAT_SHEET.md` and `flip7 basic-strategy` prints the same table. Findings: `x2` and `+` do move the threshold (no-x2 → x2: 23→22, 24→23, 25→24, 27→25 for 2-5 cards, and 36→31 at 6 cards; `+6+` lowers it by 2-3), so the old "ignores modifiers" simplification was a small, not zero, approximation.
+
+**Measurement** (paired, seat-swapped, 2,500 pairs, seed 1, new tally as challenger): vs old tally 49.9% [49.3, 50.5] (-0.3 pp [-1.5, +0.9]); vs exact `basic_strategy` 50.2% [49.3, 51.1] (+0.4 pp [-1.3, +2.1]); vs `one_step_ev` 49.5% [48.9, 50.0] (-1.0 pp [-2.1, +0.0]). No significant difference from any of them: the modifier rules refine marginal hands but do not move win rate. The verdicts are round-EV, so (ADR-020) they inherit its blind spot near EV parity.
+
+**Consequences:** `HELD_VALUE_SUM_STAY_THRESHOLDS` and `_tally_pbust_translation` are removed (superseded). The pure-bust-risk chart/PNG remain for analysis; the tally sheet is the human-facing artifact.
