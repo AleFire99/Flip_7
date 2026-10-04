@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import random
+import sys
+import time
+from collections.abc import Callable
 from itertools import combinations
 from pathlib import Path
 
@@ -33,7 +36,12 @@ from flip7.probability import (
     subtract_visible,
 )
 from flip7.scoring import TARGET_SCORE, score_line
-from flip7.simulate import SimulationReport, compare_to_baseline, simulate_games
+from flip7.simulate import (
+    PairedComparison,
+    SimulationReport,
+    compare_paired_to_baseline,
+    simulate_games,
+)
 from flip7.strategy import (
     BASIC_STRATEGY_CHART,
     BasicStrategy,
@@ -44,6 +52,9 @@ from flip7.strategy import (
     named_policies,
 )
 
+#: Headline comparisons need tight CIs; --smoke is the quick-look alternative.
+DEFAULT_COMPARE_GAMES = 5000
+SMOKE_GAMES = 200
 DEFAULT_COMPARE_BASELINES = ("stay_after_deal", "chase_flip7", "one_step_ev")
 DEFAULT_BASIC_STRATEGY_BASELINES = (
     "lookahead_ev",
@@ -145,62 +156,98 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pct_ci(rate: float, ci: tuple[float, float]) -> str:
+    return f"{100 * rate:5.1f}% [{100 * ci[0]:5.1f},{100 * ci[1]:5.1f}]"
+
+
 def _write_compare_table(
     path: Path,
     baselines: list[str],
-    results: dict[str, list[tuple[str, SimulationReport]]],
+    results: dict[str, list[tuple[str, PairedComparison]]],
     n_games: int,
     seed: int,
 ) -> None:
     lines = [
         f"Flip 7 policy comparison ({n_games} games/matchup, seed={seed})",
-        "Each row is a 2-seat [challenger, baseline] game; win% is the challenger's.",
+        "Each matchup is seed-paired and seat-swapped: every seed is played twice,",
+        "[challenger, baseline] then [baseline, challenger], on the same shuffled deck.",
+        "win% is the challenger's; diff is the paired win-rate difference",
+        "(challenger - baseline, in percentage points). Intervals are 95% CIs over",
+        "pairs; '*' marks a difference whose CI excludes zero.",
         "",
     ]
     for baseline_name in baselines:
         lines.append(f"=== challenger vs {baseline_name} ===")
         lines.append(
-            f"{'policy':<20} {'win%':>8} {'mean tot':>10} {'bust/g':>8} {'F7/g':>8}"
+            f"{'policy':<20} {'win% [95% CI]':>22} {'diff pp [95% CI]':>24} "
+            f"{'mean tot':>9} {'1st seat':>9}"
         )
-        for name, report in results[baseline_name]:
-            win_pct = 100.0 * report.wins[0] / max(report.n_games, 1)
+        for name, cmp in results[baseline_name]:
+            lo, hi = cmp.paired_diff_ci
+            diff = f"{100 * cmp.paired_diff:+6.1f} [{100 * lo:+6.1f},{100 * hi:+6.1f}]"
+            mark = "*" if cmp.diff_significant else " "
             lines.append(
-                f"{name:<20} {win_pct:>7.1f}% {report.mean_totals[0]:>10.1f} "
-                f"{report.mean_busts[0]:>8.2f} {report.mean_flip7s[0]:>8.2f}"
+                f"{name:<20} {_pct_ci(cmp.win_rate, cmp.win_rate_ci):>22} "
+                f"{diff:>24}{mark} {cmp.mean_total_challenger:>8.1f} "
+                f"{100 * cmp.first_seat_win_rate:>8.1f}%"
             )
         lines.append("")
     lines.append(
-        "lookahead_ev is the recursive DP (option B) policy; it is the slowest"
+        "'1st seat' is the share of games won by seat 0 (the dealer/first actor);"
     )
+    lines.append("it should sit near 50% only if seat order is harmless.")
     lines.append(
-        "entry above since it solves an optimal hit/stay policy from scratch on"
+        "lookahead_ev is the recursive DP (option B) policy and the slowest entry;"
     )
-    lines.append(
-        "every decision. Narrow --policies/--baselines or lower --games to iterate faster."
-    )
+    lines.append("use --smoke or fewer --policies/--baselines to iterate quickly.")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _stderr_progress(baseline: str) -> Callable[[str, int, int], None]:
+    """Single-line progress bar on stderr (only when stderr is a TTY)."""
+    start = time.monotonic()
+
+    def report(name: str, done: int, total: int) -> None:
+        if not sys.stderr.isatty() and done != total:
+            return
+        frac = done / total
+        elapsed = time.monotonic() - start
+        eta = elapsed * (1 - frac) / frac if frac else 0.0
+        bar = "#" * int(30 * frac) + "." * (30 - int(30 * frac))
+        end = "\n" if done == total else ""
+        print(
+            f"\r{name} vs {baseline} [{bar}] {done}/{total} pairs "
+            f"elapsed {elapsed:5.0f}s eta {eta:5.0f}s{end}",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    return report
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    n_games = SMOKE_GAMES if args.smoke else args.games
     baselines = [name.strip() for name in args.baselines.split(",") if name.strip()]
     policy_names = (
         [name.strip() for name in args.policies.split(",") if name.strip()]
         if args.policies
         else None
     )
-    results: dict[str, list[tuple[str, SimulationReport]]] = {}
+    results: dict[str, list[tuple[str, PairedComparison]]] = {}
     for baseline_name in baselines:
-        results[baseline_name] = compare_to_baseline(
+        results[baseline_name] = compare_paired_to_baseline(
             baseline_name,
-            args.games,
+            n_games,
             args.seed,
             policy_names,
             target=args.target,
             max_rounds=args.max_rounds,
+            progress=_stderr_progress(baseline_name),
         )
-    _write_compare_table(out / "compare.txt", baselines, results, args.games, args.seed)
+    _write_compare_table(out / "compare.txt", baselines, results, n_games, args.seed)
     print((out / "compare.txt").read_text(encoding="utf-8"))
     return 0
 
@@ -976,7 +1023,17 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: all vs stay_after_deal/chase_flip7/one_step_ev)"
         ),
     )
-    compare.add_argument("--games", type=int, default=100)
+    compare.add_argument(
+        "--games",
+        type=int,
+        default=DEFAULT_COMPARE_GAMES,
+        help="Total games per matchup (rounded up to whole seat-swapped pairs)",
+    )
+    compare.add_argument(
+        "--smoke",
+        action="store_true",
+        help=f"Fast, noisy run ({SMOKE_GAMES} games/matchup); overrides --games",
+    )
     compare.add_argument("--seed", type=int, default=1)
     compare.add_argument("--out", type=str, default="reports")
     compare.add_argument(
