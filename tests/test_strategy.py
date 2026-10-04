@@ -6,6 +6,7 @@ from flip7.state import PlayerLine
 from flip7.strategy import (
     BASIC_STRATEGY_CHART,
     BasicStrategy,
+    BasicStrategyTally,
     LookaheadEV,
     OneStepEV,
     named_policies,
@@ -136,3 +137,16 @@ def test_basic_strategy_chart_constant_covers_the_full_grid() -> None:
 
     assert set(BASIC_STRATEGY_CHART) == set(ALL_CELLS)
     assert set(BASIC_STRATEGY_CHART.values()) <= {"hit", "stay"}
+
+
+def test_tally_policy_ignores_remaining_deck_and_follows_thresholds() -> None:
+    policy = BasicStrategyTally()
+    assert isinstance(named_policies()["basic_strategy_tally"], BasicStrategyTally)
+    # Same held cards, wildly different decks: the verdict must not change.
+    line = PlayerLine(numbers=[12, 11])  # sum 23 at 2 unique -> stay threshold
+    empty = DeckCounts(numbers={}, plus={}, x2=0)
+    assert policy.decide(_view(line, full_counts())) == "stay"
+    assert policy.decide(_view(line, empty)) == "stay"
+    low = PlayerLine(numbers=[0, 1, 2, 3, 4, 5])  # sum 15 at 6 unique -> hit
+    assert policy.decide(_view(low, full_counts())) == "hit"
+    assert policy.decide(_view(PlayerLine(numbers=[3]), full_counts())) == "hit"

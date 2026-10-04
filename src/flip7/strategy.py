@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from flip7.basic_strategy import Cell, p_bust_bucket_label, plus_bucket_label
+from flip7.basic_strategy import Cell, p_bust_bucket_label, plus_bucket_label, tally_recommend
 from flip7.cards import Card, CardKind
 from flip7.engine import Policy, TableView
 from flip7.probability import lookahead_ev, one_step_ev, p_bust
@@ -301,8 +301,8 @@ class BasicStrategy:
     name = "basic_strategy"
 
     def __init__(self, chart: Mapping[Cell, str] | None = None) -> None:
-        self._chart: dict[Cell, str] = dict(chart) if chart is not None else dict(
-            BASIC_STRATEGY_CHART
+        self._chart: dict[Cell, str] = (
+            dict(chart) if chart is not None else dict(BASIC_STRATEGY_CHART)
         )
 
     def decide(self, view: TableView) -> str:
@@ -317,6 +317,22 @@ class BasicStrategy:
         return self._chart.get(cell, "stay")
 
 
+class BasicStrategyTally:
+    """The human-usable tally chart (ADR-016), simulated as a real policy.
+
+    Decides from only ``(unique_count, sum of held number values)`` via
+    :func:`flip7.basic_strategy.tally_recommend` -- no ``view.remaining``, no
+    deck tracking, ignores ``x2``/``+``. This is what a person at the table
+    can actually do, so its win rate is the real cost of "basic strategy".
+    """
+
+    name = "basic_strategy_tally"
+
+    def decide(self, view: TableView) -> str:
+        line = view.lines[view.acting]
+        return tally_recommend(line.unique_count, sum(line.numbers))
+
+
 def named_policies() -> dict[str, Policy]:
     return {
         "stay_after_deal": StayAfterDeal(),
@@ -327,4 +343,5 @@ def named_policies() -> dict[str, Policy]:
         "lookahead_ev": LookaheadEV(),
         "race_aware_ev": RaceAwareEV(),
         "basic_strategy": BasicStrategy(),
+        "basic_strategy_tally": BasicStrategyTally(),
     }
