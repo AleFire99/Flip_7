@@ -140,6 +140,10 @@ Useful flags:
 
 ### What a human can actually do: the tally
 
+The printable one-page version, covering `x2`, `+` cards and near-Flip-7 hands, is
+[docs/TALLY_CHEAT_SHEET.md](docs/TALLY_CHEAT_SHEET.md). The summary below predates it
+(ADR-022 added the modifier columns).
+
 `basic_strategy_tally` is the cheat-sheet version: it looks only at how many
 unique number cards you hold and their summed value (stay once the sum reaches
 23 / 24 / 25 / 27 / 36 at 2 / 3 / 4 / 5 / 6 unique cards; always hit with 0-1),

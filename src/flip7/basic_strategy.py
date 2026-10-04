@@ -114,12 +114,64 @@ HELD_VALUE_SUM_STAY_THRESHOLDS: dict[int, int | None] = {
 }
 
 
-def tally_recommend(unique_count: int, held_value_sum: int) -> str:
-    """The cheap human tally's own recommendation (ADR-016), ignoring
-    x2/plus -- the exact chart shows those rarely move the verdict. Not
-    used by `BasicStrategy.decide`; for the printed cheat sheet only.
+#: The full human tally (ADR-022): the sum at which to stay, by unique cards
+#: held, whether `x2` is held, and the `+` bucket (`"0"`, `"1-5"`, `"6+"`).
+#: Fitted by exhaustive search: for every held-number identity (0-6 unique
+#: cards), x2 on/off and a representative `+` total (0, 4, 8), the best
+#: "stay once sum >= T" threshold against the exact `lookahead_ev` verdict
+#: (96.8-100% agreement per row). x2 and `+` cards raise what staying banks, so
+#: they lower the sum at which to stop -- by 1-3, or about 5 with `x2` one card
+#: from Flip 7. Fewer than 2 unique cards: always hit.
+TALLY_STAY_THRESHOLDS: dict[tuple[int, bool, str], int] = {
+    (2, False, "0"): 23,
+    (2, False, "1-5"): 21,
+    (2, False, "6+"): 20,
+    (2, True, "0"): 22,
+    (2, True, "1-5"): 22,
+    (2, True, "6+"): 21,
+    (3, False, "0"): 24,
+    (3, False, "1-5"): 23,
+    (3, False, "6+"): 21,
+    (3, True, "0"): 23,
+    (3, True, "1-5"): 23,
+    (3, True, "6+"): 22,
+    (4, False, "0"): 25,
+    (4, False, "1-5"): 24,
+    (4, False, "6+"): 22,
+    (4, True, "0"): 24,
+    (4, True, "1-5"): 23,
+    (4, True, "6+"): 23,
+    (5, False, "0"): 27,
+    (5, False, "1-5"): 26,
+    (5, False, "6+"): 24,
+    (5, True, "0"): 25,
+    (5, True, "1-5"): 24,
+    (5, True, "6+"): 24,
+    (6, False, "0"): 36,
+    (6, False, "1-5"): 35,
+    (6, False, "6+"): 33,
+    (6, True, "0"): 31,
+    (6, True, "1-5"): 30,
+    (6, True, "6+"): 30,
+}
+
+
+def tally_threshold(unique_count: int, has_x2: bool = False, plus_total: int = 0) -> int | None:
+    """Sum at which the tally says stay, or `None` (always hit, under 2 cards)."""
+    if unique_count < 2:
+        return None
+    key = (min(unique_count, 6), has_x2, plus_bucket_label(plus_total))
+    return TALLY_STAY_THRESHOLDS[key]
+
+
+def tally_recommend(
+    unique_count: int, held_value_sum: int, has_x2: bool = False, plus_total: int = 0
+) -> str:
+    """The human tally's recommendation (ADR-016, extended by ADR-022 to
+    x2 and `+` cards). Uses no deck knowledge. Not used by
+    `BasicStrategy.decide`, which computes exact P(bust).
     """
-    threshold = HELD_VALUE_SUM_STAY_THRESHOLDS.get(min(unique_count, 6))
+    threshold = tally_threshold(unique_count, has_x2, plus_total)
     if threshold is None:
         return "hit"
     return "stay" if held_value_sum >= threshold else "hit"
