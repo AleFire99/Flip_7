@@ -276,6 +276,8 @@ Shipping all 7 dropped `basic_strategy` to 33.0% [31.9, 34.1] against `one_step_
 - Freeze/Flip Three land where the engine's default targeting sends them. With another seat active (`others_active=True`) they hit someone else, so they are treated as a redraw (skipped, probabilities renormalized). With no other active seat they target this line: Freeze banks the current line; Flip Three forces three draws with bust/Flip 7/Freeze handled inside.
 - Two approximations keep it tractable, because the exact state space ran out of memory (a fresh-deck empty hand was killed at >6 GB, and 12-83 s per decision when it did finish): the neutral-card redraw above, and the duplicate discarded by a Second Chance is not removed from the remaining counts. With both, a decision costs ~1-4 s, comparable to Phase 1. The approximation shifted EVs by <=0.13 points in spot checks (e.g. 37.96 -> 37.83).
 
+**Shortcut:** while a line holds a Second Chance and another seat is still active, `LookaheadEV` and `RaceAwareEV` return `hit` without running the DP. A held Second Chance cancels the one duplicate that could bust the line and no other card lowers the banked score, so one more hit weakly dominates staying (the exception is the no-other-active-seat case, where a self-targeted Flip Three's forced draws can still bust, so the DP decides there).
+
 **Verification:** with zero action cards the new DP equals the Phase 1 DP to 1e-9 on random states; Second Chance flips `{12, 11}` against a 12/11-heavy deck from stay to hit; hand `{12,11,10}` hit EV rises 33.0 -> 42.0 and `{9,5,3}` 21.8 -> 37.8 when holding a Second Chance. `compare_paired` gained `use_action_cards`.
 
 **Not done (follow-up):** a `has_second_chance` axis on the basic-strategy chart and its re-measurement.

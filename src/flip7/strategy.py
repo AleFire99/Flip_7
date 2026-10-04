@@ -72,6 +72,10 @@ class LookaheadEV:
 
     def decide(self, view: TableView) -> str:
         line = view.lines[view.acting]
+        if line.second_chances > 0 and _others_active(view):
+            # A held Second Chance cancels the one duplicate that could bust us and
+            # no other card lowers the banked score, so hitting never loses (ADR-021).
+            return "hit"
         stay = line.current_score()
         hit_ev = lookahead_ev(
             line.numbers,
@@ -133,6 +137,10 @@ class RaceAwareEV:
 
     def decide(self, view: TableView) -> str:
         line = view.lines[view.acting]
+        if line.second_chances > 0 and _others_active(view):
+            # A held Second Chance cancels the one duplicate that could bust us and
+            # no other card lowers the banked score, so hitting never loses (ADR-021).
+            return "hit"
         stay_value = float(line.current_score())
         hit_ev = lookahead_ev(
             line.numbers,
