@@ -150,3 +150,23 @@ def test_tally_policy_ignores_remaining_deck_and_follows_thresholds() -> None:
     low = PlayerLine(numbers=[0, 1, 2, 3, 4, 5])  # sum 15 at 6 unique -> hit
     assert policy.decide(_view(low, full_counts())) == "hit"
     assert policy.decide(_view(PlayerLine(numbers=[3]), full_counts())) == "hit"
+
+
+def test_policies_always_hit_while_holding_a_second_chance() -> None:
+    from flip7.strategy import RaceAwareEV
+
+    # {12, 11} against a deck that is almost all 12s/11s busts ~always without a
+    # Second Chance (stay), but is a free hit once one is held.
+    remaining = DeckCounts(numbers={12: 11, 11: 10, 1: 1}, plus={}, x2=0)
+    me = PlayerLine(numbers=[12, 11])
+    other = PlayerLine(numbers=[3])
+
+    def view(line: PlayerLine) -> TableView:
+        return TableView(
+            lines=(line, other), remaining=remaining, totals=(0, 0), dealer=0, acting=0
+        )
+
+    for policy in (LookaheadEV(), RaceAwareEV()):
+        assert policy.decide(view(me)) == "stay"
+        me_sc = PlayerLine(numbers=[12, 11], second_chances=1)
+        assert policy.decide(view(me_sc)) == "hit"

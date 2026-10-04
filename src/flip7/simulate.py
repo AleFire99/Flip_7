@@ -179,6 +179,7 @@ def compare_paired(
     *,
     target: int = TARGET_SCORE,
     max_rounds: int = 400,
+    use_action_cards: bool = False,
     progress: Callable[[int, int], None] | None = None,
 ) -> PairedComparison:
     """Play ``n_pairs`` seed-paired, seat-swapped games (``2 * n_pairs`` games)."""
@@ -194,7 +195,11 @@ def compare_paired(
         for chal_seat in (0, 1):
             policies = [challenger, baseline] if chal_seat == 0 else [baseline, challenger]
             result = play_game(
-                policies, random.Random(pair_seed), target=target, max_rounds=max_rounds
+                policies,
+                random.Random(pair_seed),
+                target=target,
+                max_rounds=max_rounds,
+                use_action_cards=use_action_cards,
             )
             tot_c += result.totals[chal_seat]
             tot_b += result.totals[1 - chal_seat]

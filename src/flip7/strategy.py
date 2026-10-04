@@ -52,6 +52,12 @@ class OneStepEV:
         return "hit" if hit_ev > stay else "stay"
 
 
+def _others_active(view: TableView) -> bool:
+    """Is any other seat still in the round? Decides where a drawn Freeze or
+    Flip Three lands in the action-card DP (ADR-021)."""
+    return any(line.active for i, line in enumerate(view.lines) if i != view.acting)
+
+
 class LookaheadEV:
     """Option B policy: hits iff the recursive DP EV of hitting beats staying.
 
@@ -66,6 +72,10 @@ class LookaheadEV:
 
     def decide(self, view: TableView) -> str:
         line = view.lines[view.acting]
+        if line.second_chances > 0 and _others_active(view):
+            # A held Second Chance cancels the one duplicate that could bust us and
+            # no other card lowers the banked score, so hitting never loses (ADR-021).
+            return "hit"
         stay = line.current_score()
         hit_ev = lookahead_ev(
             line.numbers,
@@ -73,6 +83,8 @@ class LookaheadEV:
             line.has_x2,
             view.remaining,
             busted=line.busted,
+            second_chances=line.second_chances,
+            others_active=_others_active(view),
         )
         return "hit" if hit_ev > stay else "stay"
 
@@ -125,6 +137,10 @@ class RaceAwareEV:
 
     def decide(self, view: TableView) -> str:
         line = view.lines[view.acting]
+        if line.second_chances > 0 and _others_active(view):
+            # A held Second Chance cancels the one duplicate that could bust us and
+            # no other card lowers the banked score, so hitting never loses (ADR-021).
+            return "hit"
         stay_value = float(line.current_score())
         hit_ev = lookahead_ev(
             line.numbers,
@@ -132,6 +148,8 @@ class RaceAwareEV:
             line.has_x2,
             view.remaining,
             busted=line.busted,
+            second_chances=line.second_chances,
+            others_active=_others_active(view),
         )
         adjusted = self._race_adjusted_hit_ev(view, hit_ev, stay_value)
         return "hit" if adjusted > stay_value else "stay"
@@ -201,6 +219,8 @@ class RaceAwareEV:
             line.has_x2,
             view.remaining,
             busted=line.busted,
+            second_chances=line.second_chances,
+            others_active=_others_active(view),
         )
         adjusted = self._race_adjusted_hit_ev(view, hit_ev, stay_value)
         if adjusted > stay_value:
