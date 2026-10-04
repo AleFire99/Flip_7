@@ -233,3 +233,20 @@ This reproduces the true verdict on **97.8%** of all 4096 states -- tighter than
 **Measurement:** `basic_strategy` vs `lookahead_ev`, 400 games (200 pairs), seed 1: win rate 49.2% [46.3, 52.2]; paired difference -1.5 pp [-7.5, +4.5] -- not significant. `one_step_ev` vs `lookahead_ev`: 50.2% [49.4, 51.1], +0.5 pp [-1.2, +2.2]. Seat 0 won 46.8-48.8% of games. ADR-016's earlier "-3.0 pp (200 games)" figure is therefore within noise and should not be read as a real gap.
 
 **Consequences:** Cold `lookahead_ev` decisions cost ~2 s, so a 1,000-game headline run takes tens of minutes; 5,000-game numbers for the README are deferred to a longer run (see T3).
+
+## ADR-019: Human tally chart registered as its own policy (issue #24, finding F4)
+
+**Context:** `basic_strategy` computes exact `p_bust` from `view.remaining`, which needs perfect deck tracking. The human-usable tally (ADR-016, `tally_recommend`) was only printed, never simulated, so the true cost of a chart a person can memorize was unknown.
+
+**Decision:** New `flip7.strategy.BasicStrategyTally` (`basic_strategy_tally`) decides from only `(unique_count, sum of held number values)` via `tally_recommend`; it never reads `view.remaining` and ignores `x2`/`+`. It is registered in `named_policies()` (it is cheap and non-interactive, so `compare`/`analyze` can iterate it safely).
+
+**Measurement** (paired, seat-swapped harness of ADR-018, seed 1, 5,000 games per matchup, tally as challenger):
+
+| vs | win% [95% CI] | paired diff pp [95% CI] |
+|---|---|---|
+| basic_strategy (exact p_bust) | 50.0% [49.2, 50.8] | +0.0 [-1.6, +1.7] |
+| one_step_ev | 49.4% [48.7, 50.1] | -1.2 [-2.6, +0.2] |
+
+Neither difference is significant. Against `lookahead_ev` the only measured figure is ADR-018's `basic_strategy` result (-1.5 pp [-7.5, +4.5], 400 games); since the tally is statistically indistinguishable from `basic_strategy`, its cost against `lookahead_ev` is bounded by the same interval. A tighter tally-vs-`lookahead_ev` number needs a long run (cold `lookahead_ev` decisions are ~2 s) and is deferred.
+
+**Consequences:** Throwing away deck knowledge and the modifier axes costs no measurable win rate in this 2-seat setting, so the memorizable sum-threshold table is the practical "basic strategy".

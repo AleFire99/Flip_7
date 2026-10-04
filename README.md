@@ -138,6 +138,16 @@ Useful flags:
 - `--baselines lookahead_ev` -- restrict which baselines the cost is
   measured against (default: `lookahead_ev,stay_after_deal,chase_flip7,one_step_ev`).
 
+### What a human can actually do: the tally
+
+`basic_strategy_tally` is the cheat-sheet version: it looks only at how many
+unique number cards you hold and their summed value (stay once the sum reaches
+23 / 24 / 25 / 27 / 36 at 2 / 3 / 4 / 5 / 6 unique cards; always hit with 0-1),
+with no deck tracking and no modifier handling. Measured with the paired,
+seat-swapped harness (5,000 games, seed 1; ADR-019): **50.0% [49.2, 50.8]
+against the exact-`p_bust` `basic_strategy`** and **49.4% [48.7, 50.1] against
+`one_step_ev`** -- no statistically significant loss from memorizing the table.
+
 ## Git Flow
 
 - `main` — stable releases
