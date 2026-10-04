@@ -328,6 +328,10 @@ def _cache_key(
     )
 
 
+#: Minimum mean (hit EV - stay value), in round points, for a cell to read "hit".
+MIN_HIT_EV_MARGIN = 0.1
+
+
 @dataclass
 class CellStats:
     """Aggregated `lookahead_ev` verdict for one chart cell."""
@@ -342,6 +346,15 @@ class CellStats:
     @property
     def hit_fraction(self) -> float:
         return self.hit_votes / self.samples if self.samples else 0.0
+
+    @property
+    def vote_recommendation(self) -> str:
+        """The old majority-vote verdict, kept as a diagnostic (ADR-020)."""
+        return "hit" if self.hit_votes * 2 >= self.samples else "stay"
+
+    @property
+    def vote_disagrees(self) -> bool:
+        return self.vote_recommendation != self.recommendation
 
     @property
     def mean_ev_gap(self) -> float:
@@ -387,7 +400,12 @@ def evaluate_cell(
         if hit_ev > stay_value:
             hit_votes += 1
 
-    recommendation = "hit" if hit_votes * 2 >= samples_per_cell else "stay"
+    # EV margin, not majority vote (ADR-020): a few large losses outweigh many
+    # small gains, matching how `LookaheadEV` compares hit_ev with stay_value.
+    # A cell must clear MIN_HIT_EV_MARGIN: a mean gap of ~0 is sampling noise, and
+    # hitting there only adds bust variance (ADR-020).
+    margin = (hit_ev_sum - stay_sum) / samples_per_cell
+    recommendation = "hit" if margin > MIN_HIT_EV_MARGIN else "stay"
     return CellStats(
         cell=cell,
         samples=samples_per_cell,
@@ -409,6 +427,10 @@ class BasicStrategyTable:
     def chart(self) -> dict[Cell, str]:
         """`{cell: "hit" | "stay"}` -- the memorizable part of the table."""
         return {cell: stats.recommendation for cell, stats in self.cells.items()}
+
+    def vote_disagreements(self) -> list[CellStats]:
+        """Cells where majority vote and EV margin pick different actions."""
+        return [stats for stats in self.cells.values() if stats.vote_disagrees]
 
     def recommend(
         self, numbers: list[int], has_x2: bool, plus_total: int, remaining: DeckCounts

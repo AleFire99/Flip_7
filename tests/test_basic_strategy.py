@@ -3,6 +3,7 @@ from __future__ import annotations
 from flip7.basic_strategy import (
     ALL_CELLS,
     HELD_VALUE_SUM_STAY_THRESHOLDS,
+    MIN_HIT_EV_MARGIN,
     PBUST_BUCKETS,
     PLUS_BUCKETS,
     generate_basic_strategy_table,
@@ -54,9 +55,7 @@ def test_generate_basic_strategy_table_can_differ_across_seeds() -> None:
     b = generate_basic_strategy_table(seed=2, samples_per_cell=2, cells=cells)
     # Not asserting the recommendations differ (small samples could agree by
     # chance), but the underlying sampled EVs should not be identical.
-    assert any(
-        a.cells[cell].mean_hit_ev != b.cells[cell].mean_hit_ev for cell in cells
-    )
+    assert any(a.cells[cell].mean_hit_ev != b.cells[cell].mean_hit_ev for cell in cells)
 
 
 def test_lowest_pbust_bucket_always_recommends_hit() -> None:
@@ -114,9 +113,10 @@ def test_recommend_uses_exact_p_bust_and_near_flip7() -> None:
     remaining = DeckCounts(numbers={11: 5}, plus={}, x2=0)
     # A single held low-duplication number against a deck with none of it
     # left: P(bust)=0, near_flip7=False -> ("<10%", False, False, "6+").
-    assert table.recommend([1], False, 100, remaining) == table.cells[
-        ("<10%", False, False, "6+")
-    ].recommendation
+    assert (
+        table.recommend([1], False, 100, remaining)
+        == table.cells[("<10%", False, False, "6+")].recommendation
+    )
 
 
 def test_unreachable_near_flip7_low_pbust_cell_resolves_to_hit() -> None:
@@ -152,3 +152,24 @@ def test_recommend_falls_back_to_stay_for_an_uncharted_cell() -> None:
     # Held [12] against a full 12-count remaining: P(bust) is well above
     # 40%, landing in a cell this table never generated.
     assert table.recommend([12], True, 2, remaining) == "stay"
+
+
+def test_recommendation_follows_ev_margin_and_flags_vote_disagreement() -> None:
+    from flip7.basic_strategy import CellStats
+
+    cell = ("27-40%", False, False, "0")
+    # 3 of 5 samples favor hitting (vote: hit) but the losses dominate (margin: stay).
+    stats = CellStats(
+        cell=cell,
+        samples=5,
+        hit_votes=3,
+        mean_hit_ev=10.0,
+        mean_stay_value=12.0,
+        recommendation="stay",
+    )
+    assert stats.vote_recommendation == "hit"
+    assert stats.vote_disagrees
+    table = generate_basic_strategy_table(seed=1, samples_per_cell=4, cells=[cell])
+    chosen = table.cells[cell]
+    assert chosen.recommendation == ("hit" if chosen.mean_ev_gap > MIN_HIT_EV_MARGIN else "stay")
+    assert chosen in table.vote_disagreements() or not chosen.vote_disagrees
