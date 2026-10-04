@@ -52,6 +52,12 @@ class OneStepEV:
         return "hit" if hit_ev > stay else "stay"
 
 
+def _others_active(view: TableView) -> bool:
+    """Is any other seat still in the round? Decides where a drawn Freeze or
+    Flip Three lands in the action-card DP (ADR-021)."""
+    return any(line.active for i, line in enumerate(view.lines) if i != view.acting)
+
+
 class LookaheadEV:
     """Option B policy: hits iff the recursive DP EV of hitting beats staying.
 
@@ -73,6 +79,8 @@ class LookaheadEV:
             line.has_x2,
             view.remaining,
             busted=line.busted,
+            second_chances=line.second_chances,
+            others_active=_others_active(view),
         )
         return "hit" if hit_ev > stay else "stay"
 
@@ -132,6 +140,8 @@ class RaceAwareEV:
             line.has_x2,
             view.remaining,
             busted=line.busted,
+            second_chances=line.second_chances,
+            others_active=_others_active(view),
         )
         adjusted = self._race_adjusted_hit_ev(view, hit_ev, stay_value)
         return "hit" if adjusted > stay_value else "stay"
@@ -201,6 +211,8 @@ class RaceAwareEV:
             line.has_x2,
             view.remaining,
             busted=line.busted,
+            second_chances=line.second_chances,
+            others_active=_others_active(view),
         )
         adjusted = self._race_adjusted_hit_ev(view, hit_ev, stay_value)
         if adjusted > stay_value:

@@ -265,3 +265,17 @@ Shipping all 7 dropped `basic_strategy` to 33.0% [31.9, 34.1] against `one_step_
 **Result:** With `MIN_HIT_EV_MARGIN`, the regenerated chart differs from the old one only in the 5 near-Flip-7 `27-40%` cells (stay -> hit) -- 5 of 48 cells. Head-to-head against the previous chart (2,500 pairs, seed 1): 50.1% [50.0, 50.2], +0.2 pp [-0.1, +0.5]; against `one_step_ev`: 49.4% [48.5, 50.3], -1.2 pp [-3.0, +0.6]. Neither is significant: margin-based distillation fixes a principled flaw but moves measured win rate by nothing detectable. (The previous chart vs `one_step_ev` was 50.0%, 500 pairs.)
 
 **Consequences:** Use a noise floor on any future EV-margin rule. Win-race behavior diverges from round-EV near parity, which supports T6 (a game-level, win-probability objective).
+
+## ADR-021: Action cards in the lookahead DP (issue #28, finding F3)
+
+**Context:** `DeckCounts`/`lookahead_ev` tracked only numbers, `+` cards and `x2`. In Phase 2 the 9 action cards were missing from the draw denominator (wrong probabilities), a held Second Chance was ignored, and Freeze/Flip Three were not modeled as outcomes of a hit.
+
+**Decision:**
+- `DeckCounts` gains `freeze`, `flip_three`, `second_chance` (default 0); `total` includes them and `counts_from_cards` counts them, so every probability helper uses the correct denominator. Phase 1 decks are unaffected.
+- `lookahead_ev(..., second_chances=0, others_active=True)`: Phase 1 states (no action cards left, no Second Chance held) still run the original DP bit-for-bit; anything else runs `_lookahead_ev_actions`, a DP over `(held numbers, plus total, x2, Second Chances held, remaining counts)`. Rules follow `engine.py`/`RULES_PHASE2.md`: a duplicate with a Second Chance consumes it and is not a bust; a Second Chance drawn while holding none is kept; a Flip 7 ends the round; an empty pile forces a stay. `LookaheadEV`/`RaceAwareEV` pass `line.second_chances` and `others_active` (any other active seat).
+- Freeze/Flip Three land where the engine's default targeting sends them. With another seat active (`others_active=True`) they hit someone else, so they are treated as a redraw (skipped, probabilities renormalized). With no other active seat they target this line: Freeze banks the current line; Flip Three forces three draws with bust/Flip 7/Freeze handled inside.
+- Two approximations keep it tractable, because the exact state space ran out of memory (a fresh-deck empty hand was killed at >6 GB, and 12-83 s per decision when it did finish): the neutral-card redraw above, and the duplicate discarded by a Second Chance is not removed from the remaining counts. With both, a decision costs ~1-4 s, comparable to Phase 1. The approximation shifted EVs by <=0.13 points in spot checks (e.g. 37.96 -> 37.83).
+
+**Verification:** with zero action cards the new DP equals the Phase 1 DP to 1e-9 on random states; Second Chance flips `{12, 11}` against a 12/11-heavy deck from stay to hit; hand `{12,11,10}` hit EV rises 33.0 -> 42.0 and `{9,5,3}` 21.8 -> 37.8 when holding a Second Chance. `compare_paired` gained `use_action_cards`.
+
+**Not done (follow-up):** a `has_second_chance` axis on the basic-strategy chart and its re-measurement.

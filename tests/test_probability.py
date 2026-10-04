@@ -5,6 +5,7 @@ import random
 from flip7.cards import CardKind, full_deck, number_card
 from flip7.probability import (
     DeckCounts,
+    _lookahead_ev_actions,
     _lookahead_ev_uncached,
     _LookaheadCache,
     clear_lookahead_cache,
@@ -244,3 +245,52 @@ def test_lookahead_cache_evicts_least_recently_used() -> None:
     assert len(cache) == 2
     assert cache.get(keys[1]) is None
     assert cache.get(keys[0]) == 1.0
+
+
+def test_deckcounts_total_includes_action_cards() -> None:
+    counts = counts_from_cards(full_deck(include_action_cards=True))
+    assert (counts.freeze, counts.flip_three, counts.second_chance) == (3, 3, 3)
+    assert counts.total == 94
+    assert counts_from_cards(full_deck()).total == 85
+
+
+def test_action_dp_matches_phase1_dp_when_no_action_cards() -> None:
+    rng = random.Random(11)
+    for _ in range(15):
+        numbers, plus, has_x2, remaining = _random_state(rng)
+        assert (
+            abs(
+                _lookahead_ev_actions(numbers, plus, has_x2, remaining)
+                - _lookahead_ev_uncached(numbers, plus, has_x2, remaining)
+            )
+            < 1e-9
+        )
+
+
+def test_second_chance_flips_a_stay_into_a_hit() -> None:
+    # {12, 11} vs a deck of mostly 12s and 11s: hitting busts ~always, so stay.
+    remaining = DeckCounts(numbers={12: 11, 11: 10, 1: 1}, plus={}, x2=0, second_chance=1)
+    stay = score_line([12, 11], 0, False, False)
+    assert lookahead_ev([12, 11], 0, False, remaining) <= stay
+    # Holding a Second Chance, the first duplicate is forgiven: hit becomes right.
+    assert lookahead_ev([12, 11], 0, False, remaining, second_chances=1) > stay
+
+
+def test_freeze_on_self_banks_and_flip_three_on_self_forces_draws() -> None:
+    held = [5, 6]
+    base = score_line(held, 0, False, False)
+    # Only a Freeze left, no one else active: drawing it banks the current line.
+    freeze_only = DeckCounts(numbers={}, plus={}, x2=0, freeze=1)
+    assert lookahead_ev(held, 0, False, freeze_only, others_active=False) == base
+    # Only a Flip Three plus a single safe number: forced draws take the number.
+    f3 = DeckCounts(numbers={7: 1}, plus={}, x2=0, flip_three=1)
+    ev = lookahead_ev(held, 0, False, f3, others_active=False)
+    assert ev >= base
+
+
+def test_neutral_action_cards_leave_a_phase1_decision_unchanged() -> None:
+    plain = DeckCounts(numbers={3: 3, 8: 8}, plus={}, x2=0)
+    with_actions = DeckCounts(numbers={3: 3, 8: 8}, plus={}, x2=0, freeze=3, flip_three=3)
+    assert (
+        abs(lookahead_ev([3], 0, False, plain) - lookahead_ev([3], 0, False, with_actions)) < 1e-9
+    )

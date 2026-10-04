@@ -11,10 +11,19 @@ class DeckCounts:
     numbers: dict[int, int] = field(default_factory=dict)
     plus: dict[int, int] = field(default_factory=dict)
     x2: int = 0
+    #: Action-card copies still in the pile (Phase 2, ADR-021). All zero for the
+    #: Phase 1 deck, so every Phase 1 probability is unchanged.
+    freeze: int = 0
+    flip_three: int = 0
+    second_chance: int = 0
+
+    @property
+    def actions(self) -> int:
+        return self.freeze + self.flip_three + self.second_chance
 
     @property
     def total(self) -> int:
-        return sum(self.numbers.values()) + sum(self.plus.values()) + self.x2
+        return sum(self.numbers.values()) + sum(self.plus.values()) + self.x2 + self.actions
 
 
 def full_counts() -> DeckCounts:
@@ -34,6 +43,12 @@ def counts_from_cards(cards: list[Card]) -> DeckCounts:
     for card in cards:
         if card.kind is CardKind.NUMBER and card.number is not None:
             counts.numbers[card.number] = counts.numbers.get(card.number, 0) + 1
+        elif card.kind is CardKind.FREEZE:
+            counts.freeze += 1
+        elif card.kind is CardKind.FLIP_THREE:
+            counts.flip_three += 1
+        elif card.kind is CardKind.SECOND_CHANCE:
+            counts.second_chance += 1
         elif card.double:
             counts.x2 += 1
         elif card.plus is not None:
@@ -174,7 +189,12 @@ def lookahead_cache_info() -> dict[str, int]:
 
 
 def _lookahead_key(
-    numbers: list[int], plus: int, has_x2: bool, remaining: DeckCounts
+    numbers: list[int],
+    plus: int,
+    has_x2: bool,
+    remaining: DeckCounts,
+    second_chances: int = 0,
+    others_active: bool = True,
 ) -> _LookaheadKey:
     """Immutable snapshot of the full state (zero counts dropped so equal decks match)."""
     return (
@@ -185,6 +205,11 @@ def _lookahead_key(
             tuple(sorted((k, c) for k, c in remaining.numbers.items() if c > 0)),
             tuple(sorted((v, c) for v, c in remaining.plus.items() if c > 0)),
             remaining.x2,
+            remaining.freeze,
+            remaining.flip_three,
+            remaining.second_chance,
+            second_chances,
+            others_active,
         ),
     )
 
@@ -196,15 +221,30 @@ def lookahead_ev(
     remaining: DeckCounts,
     *,
     busted: bool = False,
+    second_chances: int = 0,
+    others_active: bool = True,
 ) -> float:
-    """Cached :func:`_lookahead_ev_uncached` (module-level bounded LRU, ADR-017)."""
+    """Cached optimal solo hit/stay EV (module-level bounded LRU, ADR-017).
+
+    Phase 1 states (no action cards left in ``remaining`` and no held Second
+    Chance) use :func:`_lookahead_ev_uncached`. Anything else uses
+    :func:`_lookahead_ev_actions` (ADR-021), which models Second Chance,
+    Freeze and Flip Three; ``second_chances`` is how many the line holds and
+    ``others_active`` says whether another seat is still in the round (it
+    decides where a drawn Freeze/Flip Three lands, as in the engine).
+    """
     if busted:
         return 0.0
-    key = _lookahead_key(numbers, plus, has_x2, remaining)
+    key = _lookahead_key(numbers, plus, has_x2, remaining, second_chances, others_active)
     cached = _LOOKAHEAD_CACHE.get(key)
     if cached is not None:
         return cached
-    value = _lookahead_ev_uncached(numbers, plus, has_x2, remaining)
+    if remaining.actions == 0 and second_chances == 0:
+        value = _lookahead_ev_uncached(numbers, plus, has_x2, remaining)
+    else:
+        value = _lookahead_ev_actions(
+            numbers, plus, has_x2, remaining, second_chances, others_active
+        )
     _LOOKAHEAD_CACHE.put(key, value)
     return value
 
@@ -305,6 +345,148 @@ def _lookahead_ev_uncached(
         return value
 
     return solve(frozenset(), frozenset(), False)
+
+
+_N_NUM = 13
+_PLUS_IDX = _N_NUM
+_X2_IDX = _PLUS_IDX + len(PLUS_VALUES)
+_FREEZE_IDX = _X2_IDX + 1
+_FLIP3_IDX = _FREEZE_IDX + 1
+_SC_IDX = _FLIP3_IDX + 1
+
+
+def _neutral_indices(sc: int, others_active: bool) -> frozenset[int]:
+    if not others_active:
+        return frozenset()
+    return frozenset({_FREEZE_IDX, _FLIP3_IDX, *([_SC_IDX] if sc > 0 else [])})
+
+
+def _lookahead_ev_actions(
+    numbers: list[int],
+    plus: int,
+    has_x2: bool,
+    remaining: DeckCounts,
+    second_chances: int = 0,
+    others_active: bool = True,
+) -> float:
+    """Optimal solo hit/stay EV including action cards (ADR-021).
+
+    State is ``(held numbers, plus total, x2, Second Chances held, remaining
+    counts)``. Rules mirror ``flip7.engine``/``docs/RULES_PHASE2.md``:
+
+    - A duplicate number with a Second Chance held: both the Second Chance and
+      the duplicate are discarded, no bust. (Approximation: the discarded
+      duplicate is not removed from the remaining counts; the effect on later
+      probabilities is one card out of dozens, and tracking it multiplies the
+      state space ~10x.)
+    - A Second Chance drawn while holding none is kept; one drawn while
+      already holding one is passed on (no effect on this line).
+    - Freeze / Flip Three drawn: with ``others_active`` the engine's default
+      target is another seat, so this line is unaffected; the DP treats the
+      draw as a redraw (an approximation: it ignores that the next decision
+      point could differ, and the card leaving the deck). With no
+      other active seat it targets this line: Freeze banks it at once; Flip
+      Three forces three more draws (bust/Flip 7/Freeze handled inside).
+    - Flip 7 ends the round; an empty pile forces a stay.
+    """
+    from flip7.scoring import score_line
+
+    rem0 = (
+        *(remaining.numbers.get(k, 0) for k in range(_N_NUM)),
+        *(remaining.plus.get(v, 0) for v in PLUS_VALUES),
+        remaining.x2,
+        remaining.freeze,
+        remaining.flip_three,
+        remaining.second_chance,
+    )
+    memo: dict[tuple[object, ...], float] = {}
+
+    def stay_value(held: frozenset[int], plus_t: int, x2: bool) -> float:
+        return float(score_line(sorted(held), plus_t, x2, False))
+
+    def decide(held: frozenset[int], plus_t: int, x2: bool, sc: int, rem: tuple[int, ...]) -> float:
+        key: tuple[object, ...] = ("d", held, plus_t, x2, sc, rem)
+        cached = memo.get(key)
+        if cached is not None:
+            return cached
+        stay = stay_value(held, plus_t, x2)
+        value = stay if sum(rem) <= 0 else max(stay, draw(held, plus_t, x2, sc, rem, 0))
+        memo[key] = value
+        return value
+
+    def cont(
+        held: frozenset[int],
+        plus_t: int,
+        x2: bool,
+        sc: int,
+        rem: tuple[int, ...],
+        pending: int,
+    ) -> float:
+        if pending > 0:
+            return draw(held, plus_t, x2, sc, rem, pending - 1)
+        return decide(held, plus_t, x2, sc, rem)
+
+    def draw(
+        held: frozenset[int],
+        plus_t: int,
+        x2: bool,
+        sc: int,
+        rem: tuple[int, ...],
+        pending: int,
+    ) -> float:
+        """Expected value of one draw followed by ``pending`` more forced draws."""
+        # With another seat active, Freeze/Flip Three (and a Second Chance we
+        # would have to pass on) just land elsewhere: treated as "redraw" --
+        # skipped, with the draw probability renormalized over the cards that do
+        # affect this line -- so they do not multiply the state space.
+        skip = _neutral_indices(sc, others_active)
+        total = sum(c for i, c in enumerate(rem) if i not in skip)
+        if total <= 0:
+            return stay_value(held, plus_t, x2)
+        key: tuple[object, ...] = ("w", held, plus_t, x2, sc, rem, pending)
+        cached = memo.get(key)
+        if cached is not None:
+            return cached
+        value = 0.0
+        for idx, count in enumerate(rem):
+            if count <= 0 or idx in skip:
+                continue
+            p = count / total
+            nxt = (*rem[:idx], count - 1, *rem[idx + 1 :])
+            if idx < _N_NUM:
+                if idx in held:
+                    if sc > 0:
+                        value += p * cont(held, plus_t, x2, sc - 1, rem, pending)
+                    # else bust: contributes 0
+                    continue
+                grown = held | {idx}
+                if len(grown) >= 7:
+                    value += p * float(score_line(sorted(grown), plus_t, x2, True))
+                else:
+                    value += p * cont(grown, plus_t, x2, sc, nxt, pending)
+            elif idx < _X2_IDX:
+                plus_card = PLUS_VALUES[idx - _PLUS_IDX]
+                value += p * cont(held, plus_t + plus_card, x2, sc, nxt, pending)
+            elif idx == _X2_IDX:
+                value += p * cont(held, plus_t, True, sc, nxt, pending)
+            elif idx == _FREEZE_IDX:
+                if others_active:
+                    value += p * cont(held, plus_t, x2, sc, nxt, pending)
+                else:
+                    value += p * stay_value(held, plus_t, x2)
+            elif idx == _FLIP3_IDX:
+                extra = 0 if others_active else 3
+                value += p * cont(held, plus_t, x2, sc, nxt, pending + extra)
+            else:  # Second Chance: kept if none held, else passed on (or kept if alone)
+                new_sc = sc + 1 if (sc == 0 or not others_active) else sc
+                value += p * cont(held, plus_t, x2, new_sc, nxt, pending)
+        memo[key] = value
+        return value
+
+    held0 = frozenset(numbers)
+    if len(held0) >= 7:
+        return float(score_line(sorted(held0), plus, has_x2, True))
+    return decide(held0, plus, has_x2, second_chances, rem0)
 
 
 def remaining_from_deck(deck: list[Card]) -> DeckCounts:
