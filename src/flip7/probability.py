@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from flip7.cards import NUMBER_COUNTS, PLUS_VALUES, Card, CardKind
@@ -117,7 +118,98 @@ def one_step_ev(
     return ev
 
 
+_LookaheadKey = tuple[frozenset[int], int, bool, tuple[object, ...]]
+
+DEFAULT_LOOKAHEAD_CACHE_SIZE = 100_000
+
+
+class _LookaheadCache:
+    """Bounded LRU of top-level `lookahead_ev` results (ADR-017)."""
+
+    def __init__(self, maxsize: int = DEFAULT_LOOKAHEAD_CACHE_SIZE) -> None:
+        self.maxsize = maxsize
+        self.hits = 0
+        self.misses = 0
+        self._data: OrderedDict[_LookaheadKey, float] = OrderedDict()
+
+    def get(self, key: _LookaheadKey) -> float | None:
+        value = self._data.get(key)
+        if value is None:
+            self.misses += 1
+            return None
+        self._data.move_to_end(key)
+        self.hits += 1
+        return value
+
+    def put(self, key: _LookaheadKey, value: float) -> None:
+        self._data[key] = value
+        self._data.move_to_end(key)
+        while len(self._data) > self.maxsize:
+            self._data.popitem(last=False)
+
+    def clear(self) -> None:
+        self._data.clear()
+        self.hits = 0
+        self.misses = 0
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+
+_LOOKAHEAD_CACHE = _LookaheadCache()
+
+
+def clear_lookahead_cache() -> None:
+    """Drop every cached `lookahead_ev` result and reset hit/miss counters."""
+    _LOOKAHEAD_CACHE.clear()
+
+
+def lookahead_cache_info() -> dict[str, int]:
+    return {
+        "hits": _LOOKAHEAD_CACHE.hits,
+        "misses": _LOOKAHEAD_CACHE.misses,
+        "size": len(_LOOKAHEAD_CACHE),
+        "maxsize": _LOOKAHEAD_CACHE.maxsize,
+    }
+
+
+def _lookahead_key(
+    numbers: list[int], plus: int, has_x2: bool, remaining: DeckCounts
+) -> _LookaheadKey:
+    """Immutable snapshot of the full state (zero counts dropped so equal decks match)."""
+    return (
+        frozenset(numbers),
+        plus,
+        has_x2,
+        (
+            tuple(sorted((k, c) for k, c in remaining.numbers.items() if c > 0)),
+            tuple(sorted((v, c) for v, c in remaining.plus.items() if c > 0)),
+            remaining.x2,
+        ),
+    )
+
+
 def lookahead_ev(
+    numbers: list[int],
+    plus: int,
+    has_x2: bool,
+    remaining: DeckCounts,
+    *,
+    busted: bool = False,
+) -> float:
+    """Cached :func:`_lookahead_ev_uncached` (module-level bounded LRU, ADR-017)."""
+    if busted:
+        return 0.0
+    key = _lookahead_key(numbers, plus, has_x2, remaining)
+    cached = _LOOKAHEAD_CACHE.get(key)
+    if cached is not None:
+        return cached
+    value = _lookahead_ev_uncached(numbers, plus, has_x2, remaining)
+    _LOOKAHEAD_CACHE.put(key, value)
+    return value
+
+
+def _lookahead_ev_uncached(
     numbers: list[int],
     plus: int,
     has_x2: bool,

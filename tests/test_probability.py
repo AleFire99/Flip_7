@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import random
+
 from flip7.cards import CardKind, full_deck, number_card
 from flip7.probability import (
     DeckCounts,
+    _lookahead_ev_uncached,
+    _LookaheadCache,
+    clear_lookahead_cache,
     counts_from_cards,
     full_counts,
+    lookahead_cache_info,
     lookahead_ev,
     one_step_ev,
     p_bust,
@@ -179,3 +185,62 @@ def test_lookahead_ev_prefers_hitting_a_safe_low_bust_deck() -> None:
     stay = score_line([1, 2], 0, False, False)
     ev = lookahead_ev([1, 2], 0, False, remaining)
     assert ev > stay
+
+
+def _random_state(rng: random.Random) -> tuple[list[int], int, bool, DeckCounts]:
+    numbers = rng.sample(range(13), rng.randint(0, 6))
+    remaining = full_counts()
+    for k in numbers:
+        remaining.numbers[k] = max(0, remaining.numbers[k] - 1)
+    for k in list(remaining.numbers):
+        if rng.random() < 0.3:
+            remaining.numbers[k] = rng.randint(0, remaining.numbers[k])
+    plus_cards = [v for v in remaining.plus if rng.random() < 0.3]
+    for v in plus_cards:
+        remaining.plus[v] = 0
+    has_x2 = rng.random() < 0.3
+    if has_x2:
+        remaining.x2 = 0
+    return numbers, sum(plus_cards), has_x2, remaining
+
+
+def test_cached_lookahead_matches_uncached_on_random_states() -> None:
+    clear_lookahead_cache()
+    rng = random.Random(7)
+    for _ in range(150):
+        numbers, plus, has_x2, remaining = _random_state(rng)
+        expected = _lookahead_ev_uncached(numbers, plus, has_x2, remaining)
+        assert lookahead_ev(numbers, plus, has_x2, remaining) == expected
+        assert lookahead_ev(numbers, plus, has_x2, remaining) == expected
+
+
+def test_lookahead_cache_hits_clear_and_snapshot() -> None:
+    clear_lookahead_cache()
+    remaining = full_counts()
+    first = lookahead_ev([5, 9], 0, False, remaining)
+    assert lookahead_cache_info()["misses"] == 1
+    remaining.numbers[12] = 0  # mutating the caller's deck must not poison the cache
+    assert lookahead_ev([5, 9], 0, False, full_counts()) == first
+    assert lookahead_cache_info()["hits"] == 1
+    clear_lookahead_cache()
+    assert lookahead_cache_info()["size"] == 0
+
+
+def test_lookahead_cache_busted_and_flip7_shortcuts() -> None:
+    clear_lookahead_cache()
+    assert lookahead_ev([1], 0, False, full_counts(), busted=True) == 0.0
+    assert lookahead_ev([0, 1, 2, 3, 4, 5, 6], 0, False, full_counts()) == float(
+        score_line([0, 1, 2, 3, 4, 5, 6], 0, False, True)
+    )
+
+
+def test_lookahead_cache_evicts_least_recently_used() -> None:
+    cache = _LookaheadCache(maxsize=2)
+    keys = [(frozenset({i}), 0, False, ()) for i in range(3)]
+    cache.put(keys[0], 1.0)
+    cache.put(keys[1], 2.0)
+    assert cache.get(keys[0]) == 1.0  # refresh key 0
+    cache.put(keys[2], 3.0)  # evicts key 1
+    assert len(cache) == 2
+    assert cache.get(keys[1]) is None
+    assert cache.get(keys[0]) == 1.0
