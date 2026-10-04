@@ -250,3 +250,18 @@ This reproduces the true verdict on **97.8%** of all 4096 states -- tighter than
 Neither difference is significant. Against `lookahead_ev` the only measured figure is ADR-018's `basic_strategy` result (-1.5 pp [-7.5, +4.5], 400 games); since the tally is statistically indistinguishable from `basic_strategy`, its cost against `lookahead_ev` is bounded by the same interval. A tighter tally-vs-`lookahead_ev` number needs a long run (cold `lookahead_ev` decisions are ~2 s) and is deferred.
 
 **Consequences:** Throwing away deck knowledge and the modifier axes costs no measurable win rate in this 2-seat setting, so the memorizable sum-threshold table is the practical "basic strategy".
+
+## ADR-020: Distill the chart on EV margin, with a minimum margin (issue #26, finding F5)
+
+**Context:** `evaluate_cell` recommended `hit` when `hit_votes * 2 >= samples` (majority vote), ignoring `hit_ev_sum`/`stay_sum`, which were already accumulated. A vote ignores asymmetric stakes: a small gain when hitting is right versus a big loss when it is wrong.
+
+**Decision:** A cell's recommendation is now the sign of the mean `(hit_ev - stay_value)` across samples, but it must exceed `MIN_HIT_EV_MARGIN = 0.1` round points to read `hit`. The vote verdict is kept as a diagnostic (`CellStats.vote_recommendation`, `vote_disagrees`, `BasicStrategyTable.vote_disagreements()`), and `flip7 basic-strategy` lists the disagreeing cells in `reports/basic_strategy.txt`.
+
+**Finding -- a bare `> 0` margin is harmful.** Regenerating the shipped chart (seed 1, 60 samples/cell, ~105 s) with a plain `margin > 0` flipped 7 cells from stay to hit, all in the `27-40%` P(bust) bucket:
+- 5 near-Flip-7 cells (gaps +0.15 to +1.32; vote fractions 5-37%): real signal, consistent with ADR-016's exact boundary (p_bust ~0.397 at 6 unique cards, inside this bucket).
+- 2 non-near cells (`plus="0"`, x2 held or not): gaps +0.006 and +0.000, hit fractions 2-3% -- sampling noise.
+Shipping all 7 dropped `basic_strategy` to 33.0% [31.9, 34.1] against `one_step_ev` (paired diff -34.1 pp, 2,500 pairs, seed 1) and 33.8% against the previous chart, a ~17 pp collapse from two cells with no real edge: they are common states where hitting adds bust variance for nothing, and round-EV parity is not win-rate parity (F6). Reverting just those two cells restored 49.4% [48.5, 50.3] (-1.2 pp [-3.0, +0.6]). Hence the minimum margin.
+
+**Result:** With `MIN_HIT_EV_MARGIN`, the regenerated chart differs from the old one only in the 5 near-Flip-7 `27-40%` cells (stay -> hit) -- 5 of 48 cells. Head-to-head against the previous chart (2,500 pairs, seed 1): 50.1% [50.0, 50.2], +0.2 pp [-0.1, +0.5]; against `one_step_ev`: 49.4% [48.5, 50.3], -1.2 pp [-3.0, +0.6]. Neither is significant: margin-based distillation fixes a principled flaw but moves measured win rate by nothing detectable. (The previous chart vs `one_step_ev` was 50.0%, 500 pairs.)
+
+**Consequences:** Use a noise floor on any future EV-margin rule. Win-race behavior diverges from round-EV near parity, which supports T6 (a game-level, win-probability objective).

@@ -192,13 +192,9 @@ def _write_compare_table(
                 f"{100 * cmp.first_seat_win_rate:>8.1f}%"
             )
         lines.append("")
-    lines.append(
-        "'1st seat' is the share of games won by seat 0 (the dealer/first actor);"
-    )
+    lines.append("'1st seat' is the share of games won by seat 0 (the dealer/first actor);")
     lines.append("it should sit near 50% only if seat order is harmless.")
-    lines.append(
-        "lookahead_ev is the recursive DP (option B) policy and the slowest entry;"
-    )
+    lines.append("lookahead_ev is the recursive DP (option B) policy and the slowest entry;")
     lines.append("use --smoke or fewer --policies/--baselines to iterate quickly.")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -483,9 +479,7 @@ def cmd_pbust_bucket_check(args: argparse.Namespace) -> int:
     )
     lines.append("")
 
-    lines.append(
-        "Low/high representative bucket separation (closes ADR-013's addendum gap):"
-    )
+    lines.append("Low/high representative bucket separation (closes ADR-013's addendum gap):")
     for unique_count in UNIQUE_COUNTS:
         low = list(range(unique_count))
         high = list(range(12, 12 - unique_count, -1))
@@ -667,8 +661,7 @@ class _InteractivePolicy:
 
         print(f"Your cards: {[c.label() for c in me.cards]}")
         print(
-            f"Score if you stay now: {me.current_score()} "
-            f"(round total: {view.totals[view.acting]})"
+            f"Score if you stay now: {me.current_score()} (round total: {view.totals[view.acting]})"
         )
         for seat, line in enumerate(view.lines):
             if seat == view.acting:
@@ -803,9 +796,10 @@ def _describe_hit_buckets(hit_buckets: set[str], bucket_order: list[str]) -> str
         return "hit regardless of plus modifiers"
     if hit_buckets == {bucket_order[0]}:
         return "hit only with no plus modifiers"
-    if hit_buckets == set(bucket_order[: len(hit_buckets)]) and bucket_order[
-        len(hit_buckets) - 1
-    ] != bucket_order[-1]:
+    if (
+        hit_buckets == set(bucket_order[: len(hit_buckets)])
+        and bucket_order[len(hit_buckets) - 1] != bucket_order[-1]
+    ):
         return f"hit unless plus modifiers reach {bucket_order[len(hit_buckets)]}"
     if hit_buckets == set(bucket_order[-len(hit_buckets) :]):
         return f"hit only if plus modifiers reach {bucket_order[-len(hit_buckets)]}"
@@ -847,15 +841,9 @@ def _human_tally_cheat_sheet() -> list[str]:
             continue
         translation = _tally_pbust_translation(unique_count, threshold)
         lines.append(f"  {unique_count:<18} {threshold:>22} {translation:>18}")
-    lines.append(
-        "This tally alone reproduces the true hit/stay verdict on 97.8% of every"
-    )
-    lines.append(
-        "possible held-number identity (exhaustive check, see `flip7 pbust-bucket-check`)"
-    )
-    lines.append(
-        "-- close to, but not identical to, the shipped chart's own exact P(bust); it"
-    )
+    lines.append("This tally alone reproduces the true hit/stay verdict on 97.8% of every")
+    lines.append("possible held-number identity (exhaustive check, see `flip7 pbust-bucket-check`)")
+    lines.append("-- close to, but not identical to, the shipped chart's own exact P(bust); it")
     lines.append("ignores x2/plus, which the exact chart shows rarely move the verdict.")
     return lines
 
@@ -891,6 +879,22 @@ def _write_basic_strategy_summary(
                     f"{_describe_hit_buckets(hit_buckets, bucket_order)}."
                 )
     lines.append("")
+    disagreements = table.vote_disagreements()
+    lines.append(
+        "Recommendations use the mean EV margin (hit EV - stay value, ADR-020), not a "
+        "majority vote."
+    )
+    lines.append(
+        f"Cells where the old majority vote would differ: {len(disagreements)} of "
+        f"{len(table.cells)}."
+    )
+    for stats in disagreements:
+        lines.append(
+            f"  {stats.cell}: margin says {stats.recommendation} "
+            f"(gap {stats.mean_ev_gap:+.2f}), vote says {stats.vote_recommendation} "
+            f"({100 * stats.hit_fraction:.0f}% of samples hit)"
+        )
+    lines.append("")
     lines.append(
         "(7 unique cards is Flip 7 -- the round already ended, there is no hit/stay choice.)"
     )
@@ -907,9 +911,7 @@ def _write_basic_strategy_summary(
         chal_pct = 100.0 * report.wins[0] / n
         base_pct = 100.0 * report.wins[1] / n
         tot_gap = report.mean_totals[0] - report.mean_totals[1]
-        lines.append(
-            f"{baseline_name:<20} {chal_pct:>19.1f}% {base_pct:>15.1f}% {tot_gap:>13.1f}"
-        )
+        lines.append(f"{baseline_name:<20} {chal_pct:>19.1f}% {base_pct:>15.1f}% {tot_gap:>13.1f}")
     if matchups:
         lookahead_row = next((r for name, r in matchups if name == "lookahead_ev"), None)
         if lookahead_row is not None:
