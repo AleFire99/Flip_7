@@ -21,7 +21,7 @@ from flip7.basic_strategy import (
 )
 from flip7.cards import full_deck
 from flip7.diagnostics import DiagnosticsReport, run_diagnostics
-from flip7.engine import Policy, TraceEvent, play_game, play_round
+from flip7.engine import Policy, TableView, TraceEvent, play_game, play_round
 from flip7.probability import (
     DeckCounts,
     full_counts,
@@ -597,6 +597,116 @@ def cmd_diagnostics(args: argparse.Namespace) -> int:
     return 0
 
 
+class _InteractivePolicy:
+    """Prompts a human for hit/stay via stdin; not registered in
+    `named_policies()` since that registry is iterated wholesale by
+    automated commands (`compare`, `analyze`) that must never block on
+    `input()`.
+    """
+
+    name = "you"
+
+    def __init__(self) -> None:
+        self._last_seen = 0
+
+    def decide(self, view: TableView) -> str:
+        me = view.lines[view.acting]
+        if len(me.cards) < self._last_seen:
+            self._last_seen = 0
+        if len(me.cards) > self._last_seen:
+            new_cards = me.cards[self._last_seen :]
+            print(f"You drew: {', '.join(c.label() for c in new_cards)}")
+        self._last_seen = len(me.cards)
+
+        print(f"Your cards: {[c.label() for c in me.cards]}")
+        print(
+            f"Score if you stay now: {me.current_score()} "
+            f"(round total: {view.totals[view.acting]})"
+        )
+        for seat, line in enumerate(view.lines):
+            if seat == view.acting:
+                continue
+            status = "busted" if line.busted else "stayed" if line.stayed else "active"
+            print(f"  seat {seat}: {[c.label() for c in line.cards]} ({status})")
+
+        while True:
+            choice = input("Hit or stay? [h/s]: ").strip().lower()
+            if choice in ("h", "hit"):
+                return "hit"
+            if choice in ("s", "stay"):
+                return "stay"
+            print("Please enter 'h' for hit or 's' for stay")
+
+
+def cmd_play(args: argparse.Namespace) -> int:
+    """Play an interactive game against bot policies."""
+    bot_policy_names = [name.strip() for name in args.bot_policies.split(",") if name.strip()]
+    if not bot_policy_names:
+        bot_policy_names = ["one_step_ev", "lookahead_ev", "chase_flip7"]
+    bots = _resolve_policies(bot_policy_names)
+    if len(bots) < args.num_bots:
+        bots = [bots[i % len(bots)] for i in range(args.num_bots)]
+    else:
+        bots = bots[: args.num_bots]
+
+    policies: list[Policy] = [_InteractivePolicy(), *bots]
+    names = [p.name for p in policies]
+
+    print("Starting Flip 7!")
+    print(f"Players: {', '.join(f'seat {i}: {n}' for i, n in enumerate(names))} (seat 0 is you)")
+    print(f"Target score: {args.target}")
+    print(f"Action cards: {'enabled' if args.use_action_cards else 'disabled'}")
+    print("-" * 50)
+
+    rng = random.Random(args.seed)
+    totals = [0] * len(policies)
+    dealer = 0
+    round_no = 1
+
+    try:
+        while True:
+            print(f"\n=== Round {round_no} (dealer: seat {dealer}) ===")
+            result = play_round(
+                policies,
+                rng,
+                dealer=dealer,
+                totals=totals,
+                use_action_cards=args.use_action_cards,
+                round_no=round_no,
+            )
+            for i, score in enumerate(result.scores):
+                totals[i] += score
+
+            print(f"\n--- Round {round_no} results ---")
+            for seat, (name, score) in enumerate(zip(names, result.scores)):
+                tag = " (you)" if seat == 0 else ""
+                if result.flip7_seat == seat:
+                    status = "FLIP 7!"
+                elif result.lines[seat].busted:
+                    status = "bust"
+                else:
+                    status = "stayed"
+                print(f"  seat {seat} {name}{tag}: {status}, +{score} (total {totals[seat]})")
+
+            above = [i for i, total in enumerate(totals) if total >= args.target]
+            if above:
+                best = max(totals[i] for i in above)
+                leaders = [i for i in above if totals[i] == best]
+                if len(leaders) == 1:
+                    winner = leaders[0]
+                    print(
+                        f"\n{names[winner]} (seat {winner}) wins after {round_no} round(s)! "
+                        f"Final totals: {totals}"
+                    )
+                    return 0
+
+            dealer = (dealer + 1) % len(policies)
+            round_no += 1
+    except KeyboardInterrupt:
+        print("\n\nGame interrupted by user.")
+        return 1
+
+
 def _plot_basic_strategy(path: Path, table: BasicStrategyTable) -> None:
     plus_labels = [label for label, _low, _high in PLUS_BUCKETS]
     pbust_labels = [label for label, _low, _high in PBUST_BUCKETS]
@@ -982,6 +1092,42 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostics.add_argument("--max-rounds", type=int, default=400, dest="max_rounds")
     diagnostics.set_defaults(func=cmd_diagnostics)
 
+    # Play subcommand for interactive human vs bot gameplay
+    play = sub.add_parser(
+        "play",
+        help="Play an interactive game against bot policies",
+    )
+    play.add_argument(
+        "--bot-policies",
+        type=str,
+        default="one_step_ev,lookahead_ev,chase_flip7",
+        help="Comma-separated list of bot policies (see 'flip7 policies')",
+    )
+    play.add_argument(
+        "--num-bots",
+        type=int,
+        default=2,
+        help="Number of bot players",
+    )
+    play.add_argument(
+        "--target",
+        type=int,
+        default=TARGET_SCORE,
+        help="Race-to score (lower it for quick smoke runs)",
+    )
+    play.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducibility",
+    )
+    play.add_argument(
+        "--use-action-cards",
+        action="store_true",
+        help="Enable Freeze, Flip Three, and Second Chance cards",
+    )
+    play.set_defaults(func=cmd_play)
+
     return parser
 
 
@@ -989,3 +1135,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     raise SystemExit(args.func(args))
+
+
+if __name__ == "__main__":
+    main()
